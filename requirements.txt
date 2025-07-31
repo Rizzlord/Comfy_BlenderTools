@@ -1,0 +1,4 @@
+trimesh
+xatlas
+numpy
+Pillow
