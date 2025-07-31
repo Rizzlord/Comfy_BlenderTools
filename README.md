@@ -1,4 +1,3 @@
-ComfyUI Blender Tools
 Welcome to ComfyUI Blender Tools, a collection of custom nodes designed to integrate Blender's powerful 3D processing capabilities directly into your ComfyUI workflows. These nodes allow you to perform mesh decimation, UV unwrapping, texture projection, depth map rendering, and mesh cleanup without leaving ComfyUI.
 
 🚀 Installation
