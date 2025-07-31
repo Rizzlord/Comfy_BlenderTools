@@ -25,7 +25,6 @@ def get_blender_path():
     else:
         print(f"INFO: BLENDER_EXE environment variable not set. Falling back to default path.")
 
-    # Fallback path if environment variable is not set or invalid
     fallback_path = "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
     
     if not os.path.isfile(fallback_path):
@@ -37,7 +36,6 @@ def get_blender_path():
     print(f"INFO: Using fallback Blender executable path: {fallback_path}")
     return fallback_path
 
-# --- Custom Node: Render Depth Map (Unchanged) ---
 class BlenderRenderDepthMap:
     @classmethod
     def INPUT_TYPES(cls):
@@ -135,7 +133,6 @@ except Exception as e: print(f"Blender script failed: {{e}}",file=sys.stderr); s
             multi_view_tensor = torch.cat(output_images, dim=0) if output_images else torch.empty(0)
             return (output_images[0], multi_view_tensor)
 
-# --- Custom Node: Texture Projection Bake (with AutoUnwrap option) ---
 class BlenderTextureProjection:
     @classmethod
     def INPUT_TYPES(cls):
@@ -143,7 +140,7 @@ class BlenderTextureProjection:
             "required": {
                 "trimesh": ("TRIMESH",),
                 "images_to_project": ("IMAGE",),
-                "AutoUnwrap": ("BOOLEAN", {"default": True}), # New conditional input
+                "AutoUnwrap": ("BOOLEAN", {"default": True}),
                 "bake_resolution": (["1024", "2048", "4096", "8192"], {"default": "2048"}),
                 "projection_blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
@@ -290,7 +287,6 @@ except Exception as e:print(f"Blender script failed: {{e}}",file=sys.stderr);sys
 
             return (unwrapped_mesh, baked_texture_tensor)
 
-# --- Node Mappings ---
 NODE_CLASS_MAPPINGS = {
     "BlenderRenderDepthMap": BlenderRenderDepthMap,
     "BlenderTextureProjection": BlenderTextureProjection,

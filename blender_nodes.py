@@ -26,7 +26,6 @@ def get_blender_path():
     else:
         print(f"INFO: BLENDER_EXE environment variable not set. Falling back to default path.")
 
-    # Fallback path if environment variable is not set or invalid
     fallback_path = "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
     
     if not os.path.isfile(fallback_path):
@@ -38,14 +37,10 @@ def get_blender_path():
     print(f"INFO: Using fallback Blender executable path: {fallback_path}")
     return fallback_path
 
-# --------------------------------------------------------------------------------
-# --- HELPER FUNCTIONS (used by nodes below)
-# --------------------------------------------------------------------------------
 def _run_blender_script(script_path):
     """Helper function to execute a Blender script via subprocess."""
     blender_exe = get_blender_path()
     try:
-        # It's better to capture stdout and stderr to provide more detailed error info
         result = subprocess.run(
             [blender_exe, '--factory-startup', '--background', '--python', script_path],
             check=True, capture_output=True, text=True
@@ -53,7 +48,6 @@ def _run_blender_script(script_path):
         if result.stdout:
             print(f"Blender script stdout: {result.stdout}")
     except subprocess.CalledProcessError as e:
-        # This gives a much more informative error message in the console
         error_message = (
             f"Blender execution failed with return code {e.returncode}.\n"
             f"--- Stderr ---\n{e.stderr}\n"
@@ -65,9 +59,6 @@ def _run_blender_script(script_path):
     except Exception as e:
         raise RuntimeError(f"An unexpected error occurred while running Blender: {e}")
 
-# --------------------------------------------------------------------------------
-# --- NEW NODE: BlenderDecimate
-# --------------------------------------------------------------------------------
 class BlenderDecimate:
     @classmethod
     def INPUT_TYPES(cls):
@@ -84,7 +75,7 @@ class BlenderDecimate:
 
     RETURN_TYPES = ("TRIMESH",)
     FUNCTION = "decimate"
-    CATEGORY = "Comfy_BlenderTools" # Assuming this is your category
+    CATEGORY = "Comfy_BlenderTools"
 
     def decimate(self, trimesh, apply_decimation, max_face_count, triangulate, merge_distance):
         """
@@ -106,7 +97,6 @@ class BlenderDecimate:
                 'tri': triangulate, 'merge_dist': merge_distance
             }
 
-            # This script now correctly finds the mesh object after import.
             script = f"""
 import bpy, sys
 p = {{
@@ -164,9 +154,6 @@ except Exception as e:
             processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
             return (processed_mesh,)
 
-# --------------------------------------------------------------------------------
-# --- NEW NODE: BlenderUnwrap
-# --------------------------------------------------------------------------------
 class BlenderUnwrap:
     UNWRAP_METHODS = ["XAtlas UV Atlas", "Smart UV Project", "Unwrap (Angle Based)", "Unwrap (Conformal)", "Cube Projection"]
     TEXTURE_RESOLUTIONS = ["512", "768", "1024", "1536", "2048", "4096", "8192"]
@@ -301,7 +288,6 @@ except Exception as e:
             raise ImportError("xatlas not installed. Please run: pip install xatlas")
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Step 1: Use xatlas to perform the unwrap
             vmapping, indices, uvs = xatlas.parametrize(trimesh.vertices, trimesh.faces)
             unwrapped_mesh = trimesh_loader.Trimesh(
                 vertices=trimesh.vertices[vmapping], 
@@ -310,12 +296,10 @@ except Exception as e:
                 process=False
             )
             
-            # Step 2: If no refinement is needed, return the xatlas result directly
             if not p.get('refine_with_minimum_stretch') and not p.get('final_merge_distance') > 0.0:
                 uv_preview = self.generate_uv_preview(unwrapped_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
                 return (unwrapped_mesh, uv_preview)
             
-            # Step 3: Otherwise, run the post-processing script in Blender
             refine_input = os.path.join(temp_dir, "refine_in.obj")
             final_out = os.path.join(temp_dir, "o.obj")
             unwrapped_mesh.export(file_obj=refine_input)
@@ -367,9 +351,6 @@ except Exception as e:
             uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
         return uv_layout_image
 
-# --------------------------------------------------------------------------------
-# --- EXISTING NODES (unchanged)
-# --------------------------------------------------------------------------------
 class ApplyTextureAndExport:
     @classmethod
     def INPUT_TYPES(cls):
@@ -466,9 +447,6 @@ except Exception as e:
         print(f"Successfully exported assets to folder: {model_output_folder}")
         return (model_output_folder,)
 
-# --------------------------------------------------------------------------------
-# --- NODE MAPPINGS
-# --------------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
     "BlenderUnwrap": BlenderUnwrap,

@@ -21,7 +21,6 @@ def get_blender_path():
     else:
         print(f"INFO: BLENDER_EXE environment variable not set. Falling back to default path.")
 
-    # Fallback path if environment variable is not set or invalid
     fallback_path = "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
     
     if not os.path.isfile(fallback_path):
@@ -79,21 +78,18 @@ class Voxelize:
         """
         Applies Blender's Remesh modifier to the input trimesh.
         """
-        # Set default values
         defaults = {
             'voxel_size': 0.0125, 'adaptivity': 0.0, 'octree_depth': 4,
             'scale': 0.9, 'remove_disconnected': True, 
             'disconnected_threshold': 1.0, 'sharpness': 1.0
         }
 
-        # Override defaults with any provided settings
         params = defaults.copy()
         if Voxel_Settings:
             params.update(Voxel_Settings)
         if Other_Modes_Settings:
             params.update(Other_Modes_Settings)
         
-        # Add the main required params
         params.update({
             'mode': mode,
             'smooth_shading': smooth_shading
@@ -106,7 +102,6 @@ class Voxelize:
             
             trimesh.export(file_obj=input_mesh_path)
 
-            # Pass all params to the script
             script_params = {k: repr(v) for k, v in params.items()}
             script_params['i'] = repr(input_mesh_path)
             script_params['o'] = repr(output_mesh_path)
@@ -161,7 +156,6 @@ except Exception as e:
             processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
             return (processed_mesh,)
 
-# --- Sub-nodes for routing settings ---
 class VoxelSettings:
     @classmethod
     def INPUT_TYPES(s):

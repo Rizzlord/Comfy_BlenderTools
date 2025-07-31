@@ -1,9 +1,7 @@
-# Import the new nodes and remove the old one
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, ApplyTextureAndExport, BlendFBX_Export
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .utils import Voxelize, VoxelSettings, OtherModesSettings
 
-# Register the new nodes in the mappings
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
     "BlenderUnwrap": BlenderUnwrap,
@@ -16,7 +14,6 @@ NODE_CLASS_MAPPINGS = {
     "OtherModesSettings": OtherModesSettings,
 }
 
-# Give the new nodes display names
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderDecimate": "Blender Decimate",
     "BlenderUnwrap": "Blender Unwrap",
