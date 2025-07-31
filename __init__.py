@@ -1,6 +1,7 @@
 # Import the new nodes and remove the old one
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, ApplyTextureAndExport, BlendFBX_Export
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
+from .utils import Voxelize, VoxelSettings, OtherModesSettings
 
 # Register the new nodes in the mappings
 NODE_CLASS_MAPPINGS = {
@@ -10,6 +11,9 @@ NODE_CLASS_MAPPINGS = {
     "BlendFBX_Export": BlendFBX_Export,
     "BlenderTextureProjection": BlenderTextureProjection,
     "BlenderRenderDepthMap": BlenderRenderDepthMap,
+    "Voxelize": Voxelize,
+    "VoxelSettings": VoxelSettings,
+    "OtherModesSettings": OtherModesSettings,
 }
 
 # Give the new nodes display names
@@ -20,6 +24,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlendFBX_Export": "Export for Blender (FBX + Textures)",
     "BlenderTextureProjection": "Texture Projection Bake (Blender)",
     "BlenderRenderDepthMap": "Render Depth Map (Blender)",
+    "Voxelize": "Blender Remesh",
+    "VoxelSettings": "Remesh Voxel Settings",
+    "OtherModesSettings": "Remesh Other Settings",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
