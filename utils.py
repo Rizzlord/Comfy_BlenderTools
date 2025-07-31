@@ -178,8 +178,8 @@ class OtherModesSettings:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {
-            "octree_depth": ("INT", {"default": 2, "min": 2, "max": 10, "step": 2}),
-            "scale": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 2.0, "step": 0.01, "display": "number"}),
+            "octree_depth": ("INT", {"default": 6, "min": 2, "max": 10, "step": 2}),
+            "scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 2.0, "step": 0.01, "display": "number"}),
             "sharpness": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display": "number"}),
             "remove_disconnected": ("BOOLEAN", {"default": True}),
             "disconnected_threshold": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "display": "number"}),
