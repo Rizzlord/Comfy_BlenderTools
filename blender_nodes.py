@@ -155,12 +155,11 @@ except Exception as e:
             return (processed_mesh,)
 
 class BlenderUnwrap:
-    UNWRAP_METHODS = ["XAtlas UV Atlas", "Smart UV Project", "Unwrap (Angle Based)", "Unwrap (Conformal)", "Cube Projection"]
+    UNWRAP_METHODS = ["XAtlas UV Atlas", "Smart UV Project", "Cube Projection"]
     TEXTURE_RESOLUTIONS = ["512", "768", "1024", "1536", "2048", "4096", "8192"]
 
     @classmethod
     def INPUT_TYPES(cls):
-        """Inputs for UV Unwrapping and Post-Processing."""
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
@@ -182,7 +181,6 @@ class BlenderUnwrap:
     CATEGORY = "Comfy_BlenderTools"
 
     def unwrap(self, trimesh, **kwargs):
-        """Main function to orchestrate the unwrapping pipeline."""
         unwrap_method = kwargs.get("unwrap_method")
 
         if unwrap_method == "XAtlas UV Atlas":
@@ -191,7 +189,6 @@ class BlenderUnwrap:
             return self.process_with_blender(trimesh, **kwargs)
 
     def _get_post_process_script_block(self):
-        """Returns the reusable Blender script block for post-processing."""
         return """
     if p['refine_s'] or p['final_merge_dist'] > 0.0:
         bpy.ops.object.mode_set(mode='EDIT')
@@ -216,7 +213,6 @@ class BlenderUnwrap:
 """
 
     def process_with_blender(self, trimesh, **p):
-        """Processes the mesh entirely within Blender: Unwrap and Post-Process."""
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.obj")
             output_mesh_path = os.path.join(temp_dir, "o.obj")
@@ -235,7 +231,7 @@ class BlenderUnwrap:
             }
 
             script = f"""
-import bpy, sys, bmesh
+import bpy, sys
 p = {{
     'i': r"{params['i']}", 'o': r"{params['o']}", 'unwrap_m': "{params['unwrap_m']}", 
     'refine_s': {params['refine_s']}, 'angle_l': {params['angle_l']}, 'margin': {params['margin']},
@@ -253,14 +249,6 @@ try:
 
     if p['unwrap_m'] == 'Smart UV Project':
         bpy.ops.uv.smart_project(angle_limit=p['angle_l'], island_margin=p['margin'], correct_aspect=p['correct_a'], scale_to_bounds=True)
-    elif p['unwrap_m'] in ['Unwrap (Angle Based)', 'Unwrap (Conformal)']:
-        bm = bmesh.from_edit_mesh(m); bm.edges.ensure_lookup_table()
-        for e in bm.edges:
-            if len(e.link_faces) == 2 and e.link_faces[0].normal.angle(e.link_faces[1].normal) > p['angle_l']: e.seam = True
-            elif len(e.link_faces) != 2: e.seam = True
-        bmesh.update_edit_mesh(m)
-        method = 'ANGLE_BASED' if p['unwrap_m'] == 'Unwrap (Angle Based)' else 'CONFORMAL'
-        bpy.ops.uv.unwrap(method=method, correct_aspect=p['correct_a'], margin=p['margin'])
     elif p['unwrap_m'] == 'Cube Projection':
         bpy.ops.uv.cube_project(cube_size=1.0, correct_aspect=p['correct_a'], scale_to_bounds=False)
 
@@ -281,7 +269,6 @@ except Exception as e:
             return (processed_mesh, uv_preview)
 
     def process_with_xatlas(self, trimesh, **p):
-        """Uses xatlas for unwrapping, and Blender for optional post-processing."""
         try:
             import xatlas
         except ImportError:
@@ -338,7 +325,6 @@ except Exception as e:
             return (final_mesh, uv_preview)
 
     def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
-        """Generates a torch tensor image of the UV layout."""
         uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
         if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
             img = Image.new('RGB', (res_x, res_y), 'black')
@@ -351,7 +337,7 @@ except Exception as e:
             uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
         return uv_layout_image
 
-class ApplyTextureAndExport:
+class ApplyAlbedoAndExport:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -361,12 +347,23 @@ class ApplyTextureAndExport:
                 "filename_prefix": ("STRING", {"default": "TexturedMesh"})
             }
         }
-    RETURN_TYPES, RETURN_NAMES, FUNCTION, CATEGORY, OUTPUT_NODE = ("TRIMESH", "STRING"), ("trimesh", "glb_path"), "apply_and_export", "Comfy_BlenderTools", True
+    RETURN_TYPES, RETURN_NAMES, FUNCTION, CATEGORY, OUTPUT_NODE = ("TRIMESH", "STRING"), ("trimesh", "glb_path"), "apply_albedo_and_export", "Comfy_BlenderTools", True
 
-    def apply_and_export(self, trimesh, texture, filename_prefix):
+    def apply_albedo_and_export(self, trimesh, texture, filename_prefix):
         pil_image = Image.fromarray((texture[0].cpu().numpy() * 255).astype(np.uint8))
         textured_mesh = trimesh.copy()
-        textured_mesh.visual = trimesh_loader.visual.TextureVisuals(uv=trimesh.visual.uv, material=trimesh_loader.visual.material.PBRMaterial(baseColorTexture=pil_image))
+
+        if not isinstance(textured_mesh.visual, trimesh_loader.visual.TextureVisuals):
+            uvs = None
+            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'uv'):
+                uvs = trimesh.visual.uv
+            textured_mesh.visual = trimesh_loader.visual.TextureVisuals(uv=uvs)
+
+        if textured_mesh.visual.material is None:
+            textured_mesh.visual.material = trimesh_loader.visual.material.PBRMaterial()
+        
+        textured_mesh.visual.material.baseColorTexture = pil_image
+
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
         output_glb_path_str = os.path.join(full_output_folder, f"{filename}_{counter:05}.glb")
         textured_mesh.export(output_glb_path_str)
@@ -450,13 +447,13 @@ except Exception as e:
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
     "BlenderUnwrap": BlenderUnwrap,
-    "ApplyTextureAndExport": ApplyTextureAndExport,
+    "ApplyAlbedoAndExport": ApplyAlbedoAndExport,
     "BlendFBX_Export": BlendFBX_Export,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderDecimate": "Blender Decimate",
     "BlenderUnwrap": "Blender Unwrap",
-    "ApplyTextureAndExport": "Apply Texture and Export GLB",
+    "ApplyAlbedoAndExport": "Apply Albedo and Export GLB",
     "BlendFBX_Export": "Export for Blender (FBX + Textures)",
 }
