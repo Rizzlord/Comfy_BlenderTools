@@ -1,6 +1,4 @@
 import os
-import subprocess
-import sys
 import tempfile
 import trimesh as trimesh_loader
 import folder_paths
@@ -9,60 +7,11 @@ import torch
 from PIL import Image, ImageDraw
 from pathlib import Path
 import math
-
-def get_blender_path():
-    """
-    Finds the Blender executable path from the BLENDER_EXE environment variable
-    with a fallback to a default path. Logs the result.
-    """
-    blender_path = os.environ.get("BLENDER_EXE")
-    
-    if blender_path and os.path.isfile(blender_path):
-        print(f"INFO: Found Blender executable via BLENDER_EXE environment variable: {blender_path}")
-        return blender_path
-    
-    if blender_path:
-        print(f"WARNING: BLENDER_EXE environment variable was found, but the path '{blender_path}' is not a valid file.")
-    else:
-        print(f"INFO: BLENDER_EXE environment variable not set. Falling back to default path.")
-
-    fallback_path = "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
-    
-    if not os.path.isfile(fallback_path):
-        raise FileNotFoundError(
-            f"Blender executable not found at the default path: {fallback_path}. "
-            "Please set the BLENDER_EXE environment variable to the correct path of your blender.exe."
-        )
-    
-    print(f"INFO: Using fallback Blender executable path: {fallback_path}")
-    return fallback_path
-
-def _run_blender_script(script_path):
-    """Helper function to execute a Blender script via subprocess."""
-    blender_exe = get_blender_path()
-    try:
-        result = subprocess.run(
-            [blender_exe, '--factory-startup', '--background', '--python', script_path],
-            check=True, capture_output=True, text=True
-        )
-        if result.stdout:
-            print(f"Blender script stdout: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        error_message = (
-            f"Blender execution failed with return code {e.returncode}.\n"
-            f"--- Stderr ---\n{e.stderr}\n"
-            f"--- Stdout ---\n{e.stdout}"
-        )
-        raise RuntimeError(error_message)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Blender executable not found at '{blender_exe}'. Please set the BLENDER_EXE environment variable.")
-    except Exception as e:
-        raise RuntimeError(f"An unexpected error occurred while running Blender: {e}")
+from .utils import _run_blender_script
 
 class BlenderDecimate:
     @classmethod
     def INPUT_TYPES(cls):
-        """Inputs for Decimation and Mesh Cleanup."""
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
@@ -78,9 +27,6 @@ class BlenderDecimate:
     CATEGORY = "Comfy_BlenderTools"
 
     def decimate(self, trimesh, apply_decimation, max_face_count, triangulate, merge_distance):
-        """
-        Processes the mesh in Blender, preserving PBR materials by using the GLB format.
-        """
         current_faces = len(trimesh.faces)
         ratio = max_face_count / current_faces if current_faces > 0 else 1.0
         
@@ -105,10 +51,8 @@ p = {{
 }}
 try:
     bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
-    
     bpy.ops.import_scene.gltf(filepath=p['i'])
     
-    # --- FIX IS HERE: Robustly find the imported MESH object ---
     mesh_obj = None
     for obj in bpy.context.selected_objects:
         if obj.type == 'MESH':
@@ -118,20 +62,16 @@ try:
     if mesh_obj is None:
         raise Exception("Script Error: No mesh was found after importing the GLB.")
 
-    # Ensure only the mesh object is selected and active
     bpy.ops.object.select_all(action='DESELECT')
     mesh_obj.select_set(True)
     bpy.context.view_layer.objects.active = mesh_obj
     obj = mesh_obj
-    # -----------------------------------------------------------
 
-    # STEP 1: Switch to Edit Mode and Merge by Distance FIRST
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
     if p['merge_dist'] > 0.0:
         bpy.ops.mesh.remove_doubles(threshold=p['merge_dist'])
     
-    # STEP 2: Switch back to Object Mode and apply Decimate Modifier SECOND
     bpy.ops.object.mode_set(mode='OBJECT')
     if p['apply_dec'] and p['ratio'] < 1.0:
         mod = obj.modifiers.new(name="DecimateMod", type='DECIMATE')
@@ -317,8 +257,9 @@ except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr)
     sys.exit(1)
 """
-            with open(os.path.join(temp_dir, "post.py"), 'w') as f: f.write(post_script)
-            _run_blender_script(os.path.join(temp_dir, "post.py"))
+            script_path = os.path.join(temp_dir, "post.py")
+            with open(script_path, 'w') as f: f.write(post_script)
+            _run_blender_script(script_path)
 
             final_mesh = trimesh_loader.load(final_out, process=False)
             uv_preview = self.generate_uv_preview(final_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
@@ -394,7 +335,6 @@ class BlendFBX_Export:
             counter += 1
         os.makedirs(model_output_folder)
 
-        print(f"Exporting textures for {original_filename}...")
         try:
             if hasattr(trimesh, 'geometry') and trimesh.geometry:
                 for geom in trimesh.geometry.values():
@@ -412,11 +352,9 @@ class BlendFBX_Export:
                                 texture_image = getattr(mat, prop)
                                 texture_path = os.path.join(model_output_folder, filename)
                                 texture_image.save(texture_path)
-                                print(f"  Saved: {texture_path}")
         except Exception as e:
-            print(f"Warning: Could not export textures. Reason: {e}")
+            pass
 
-        print(f"Converting mesh to FBX...")
         final_fbx_filename = f"{os.path.basename(model_output_folder)}.fbx"
         final_fbx_path = os.path.join(model_output_folder, final_fbx_filename)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -425,6 +363,8 @@ class BlendFBX_Export:
                 trimesh.export(temp_obj_path, include_texture=False, include_color=False)
             except Exception as e:
                 return (f"Error exporting intermediate mesh file: {e}",)
+            
+            script_path = os.path.join(temp_dir, "convert_script.py")
             script = f"""
 import bpy, sys
 import addon_utils
@@ -438,22 +378,7 @@ try:
 except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr); sys.exit(1)
 """
-            with open(os.path.join(temp_dir, "convert_script.py"), 'w') as f: f.write(script)
-            _run_blender_script(os.path.join(temp_dir, "convert_script.py"))
+            with open(script_path, 'w') as f: f.write(script)
+            _run_blender_script(script_path)
 
-        print(f"Successfully exported assets to folder: {model_output_folder}")
         return (model_output_folder,)
-
-NODE_CLASS_MAPPINGS = {
-    "BlenderDecimate": BlenderDecimate,
-    "BlenderUnwrap": BlenderUnwrap,
-    "ApplyAlbedoAndExport": ApplyAlbedoAndExport,
-    "BlendFBX_Export": BlendFBX_Export,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "BlenderDecimate": "Blender Decimate",
-    "BlenderUnwrap": "Blender Unwrap",
-    "ApplyAlbedoAndExport": "Apply Albedo and Export GLB",
-    "BlendFBX_Export": "Export for Blender (FBX + Textures)",
-}

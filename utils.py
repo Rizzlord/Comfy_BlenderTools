@@ -4,12 +4,9 @@ import sys
 import tempfile
 import trimesh as trimesh_loader
 import folder_paths
+import numpy as np
 
 def get_blender_path():
-    """
-    Finds the Blender executable path from the BLENDER_EXE environment variable
-    with a fallback to a default path. Logs the result.
-    """
     blender_path = os.environ.get("BLENDER_EXE")
     
     if blender_path and os.path.isfile(blender_path):
@@ -33,7 +30,6 @@ def get_blender_path():
     return fallback_path
     
 def _run_blender_script(script_path):
-    """Helper function to execute a Blender script via subprocess."""
     blender_exe = get_blender_path()
     try:
         result = subprocess.run(
@@ -57,7 +53,6 @@ def _run_blender_script(script_path):
 class Voxelize:
     @classmethod
     def INPUT_TYPES(cls):
-        """Inputs for the Remesh modifier."""
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
@@ -75,9 +70,6 @@ class Voxelize:
     CATEGORY = "Comfy_BlenderTools/Utils"
 
     def remesh(self, trimesh, mode, smooth_shading, Voxel_Settings=None, Other_Modes_Settings=None):
-        """
-        Applies Blender's Remesh modifier to the input trimesh.
-        """
         defaults = {
             'voxel_size': 0.0125, 'adaptivity': 0.0, 'octree_depth': 4,
             'scale': 0.9, 'remove_disconnected': True, 
