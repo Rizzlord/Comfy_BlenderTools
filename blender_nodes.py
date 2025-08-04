@@ -134,6 +134,7 @@ class BlenderUnwrap:
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
         if p['refine_s']:
+            bpy.ops.uv.seams_from_islands()
             bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
             bpy.ops.uv.select_all(action='SELECT')
             bpy.ops.uv.pack_islands(margin=p['margin'])
