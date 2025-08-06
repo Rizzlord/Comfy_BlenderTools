@@ -425,15 +425,11 @@ except Exception as e:
 
             return (baked_maps, normal_map_tensor, ao_map_tensor)
 
-
-class ApplyAndExportMaps:
+class ApplyTexturesToMesh:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "trimesh": ("TRIMESH",),
-                "filename_prefix": ("STRING", {"default": "TexturedMesh"}),
-            },
+            "required": { "trimesh": ("TRIMESH",), },
             "optional": {
                 "baked_maps": ("BAKED_MAPS",),
                 "albedo_map": ("IMAGE",),
@@ -441,26 +437,21 @@ class ApplyAndExportMaps:
                 "ao_map": ("IMAGE",),
             }
         }
-    RETURN_TYPES = ("TRIMESH", "STRING")
-    RETURN_NAMES = ("trimesh", "glb_path")
-    FUNCTION = "apply_and_export"
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "apply_textures"
     CATEGORY = "Comfy_BlenderTools"
-    OUTPUT_NODE = True
 
-    def apply_and_export(self, trimesh, filename_prefix, baked_maps=None, albedo_map=None, normal_map=None, ao_map=None):
+    def apply_textures(self, trimesh, baked_maps=None, albedo_map=None, normal_map=None, ao_map=None):
         final_maps = {}
         if baked_maps:
             final_maps.update(baked_maps)
         
-        if albedo_map is not None:
-            final_maps['albedo'] = albedo_map
-        if normal_map is not None:
-            final_maps['normal'] = normal_map
-        if ao_map is not None:
-            final_maps['ao'] = ao_map
+        if albedo_map is not None: final_maps['albedo'] = albedo_map
+        if normal_map is not None: final_maps['normal'] = normal_map
+        if ao_map is not None: final_maps['ao'] = ao_map
 
         if not final_maps:
-            raise ValueError("No maps provided to apply. Connect either baked_maps or individual map inputs.")
+            return (trimesh,)
 
         textured_mesh = trimesh.copy()
 
@@ -477,89 +468,71 @@ class ApplyAndExportMaps:
             if tensor is None: return None
             return Image.fromarray((tensor[0].cpu().numpy() * 255).astype(np.uint8))
 
-        if 'albedo' in final_maps:
-            material.baseColorTexture = tensor_to_pil(final_maps['albedo'])
-        if 'normal' in final_maps:
-            material.normalTexture = tensor_to_pil(final_maps['normal'])
-        if 'ao' in final_maps:
-            material.occlusionTexture = tensor_to_pil(final_maps['ao'])
-
-        full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
-        output_glb_path_str = os.path.join(full_output_folder, f"{filename}_{counter:05}.glb")
+        if 'albedo' in final_maps: material.baseColorTexture = tensor_to_pil(final_maps['albedo'])
+        if 'normal' in final_maps: material.normalTexture = tensor_to_pil(final_maps['normal'])
+        if 'ao' in final_maps: material.occlusionTexture = tensor_to_pil(final_maps['ao'])
         
-        textured_mesh.export(output_glb_path_str)
-        
-        return (textured_mesh, str(Path(subfolder) / f"{filename}_{counter:05}.glb"))
+        return (textured_mesh,)
 
-class BlendFBX_Export:
+class BlenderExportGLB:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "directory": ("STRING", {"default": "output/exported_models"}),
-                "original_filename": ("STRING", {"default": "model.glb"}),
+                "output_path": ("STRING", {"default": "blender_exports"}),
+                "filename_prefix": ("STRING", {"default": "ExportedMesh"}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
             }
         }
-    RETURN_TYPES, RETURN_NAMES, FUNCTION, CATEGORY, OUTPUT_NODE = ("STRING",), ("MODEL_FOLDER_PATH",), "export_model_and_textures_separately", "Comfy_BlenderTools", True
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("glb_path",)
+    FUNCTION = "export_glb"
+    CATEGORY = "Comfy_BlenderTools"
+    OUTPUT_NODE = True
 
-    def export_model_and_textures_separately(self, trimesh, directory, original_filename, merge_distance):
-        if trimesh is None:
-            return ("Error: No mesh provided.",)
-
-        model_base_name = os.path.splitext(os.path.basename(original_filename))[0]
-        model_output_folder = os.path.join(directory, model_base_name)
+    def export_glb(self, trimesh, output_path, filename_prefix, merge_distance):
+        if not os.path.isabs(output_path):
+            final_output_dir = os.path.join(folder_paths.get_output_directory(), output_path)
+        else:
+            final_output_dir = output_path
+        
+        os.makedirs(final_output_dir, exist_ok=True)
+        
+        base_filepath = os.path.join(final_output_dir, filename_prefix)
+        final_glb_path = f"{base_filepath}.glb"
         counter = 1
-        while os.path.exists(model_output_folder):
-            numbered_folder_name = f"{model_base_name}_{counter}"
-            model_output_folder = os.path.join(directory, numbered_folder_name)
+        while os.path.exists(final_glb_path):
+            final_glb_path = f"{base_filepath}_{counter:05}.glb"
             counter += 1
-        os.makedirs(model_output_folder)
 
-        try:
-            if hasattr(trimesh, 'geometry') and trimesh.geometry:
-                for geom in trimesh.geometry.values():
-                    if hasattr(geom, 'visual') and hasattr(geom.visual, 'material'):
-                        mat = geom.visual.material
-                        texture_map = {
-                            "baseColorTexture": "texture_basecolor.png",
-                            "metallicRoughnessTexture": "texture_metallic-roughness.png",
-                            "normalTexture": "texture_normal.png",
-                            "occlusionTexture": "texture_ao.png",
-                            "emissiveTexture": "texture_emissive.png",
-                        }
-                        for prop, filename in texture_map.items():
-                            if hasattr(mat, prop) and getattr(mat, prop) is not None:
-                                texture_image = getattr(mat, prop)
-                                texture_path = os.path.join(model_output_folder, filename)
-                                texture_image.save(texture_path)
-        except Exception as e:
-            pass
-
-        final_fbx_filename = f"{os.path.basename(model_output_folder)}.fbx"
-        final_fbx_path = os.path.join(model_output_folder, final_fbx_filename)
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_obj_path = os.path.join(temp_dir, "temp_mesh.obj")
-            try:
-                trimesh.export(temp_obj_path, include_texture=False, include_color=False)
-            except Exception as e:
-                return (f"Error exporting intermediate mesh file: {e}",)
-            
-            script_path = os.path.join(temp_dir, "convert_script.py")
+            temp_glb_path = os.path.join(temp_dir, "temp.glb")
+            trimesh.export(temp_glb_path)
+
+            script_path = os.path.join(temp_dir, "clean_and_export.py")
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
+            
             script = f"""
 {clean_mesh_func_script}
 import bpy, sys
-import addon_utils
-p = {{'in_obj': r'{temp_obj_path}', 'out_fbx': r'{final_fbx_path}', 'merge_dist': {merge_distance}}}
+p = {{'in_glb': r'{temp_glb_path}', 'out_glb': r'{final_glb_path}', 'merge_dist': {merge_distance}}}
 try:
-    addon_utils.enable('io_scene_fbx', default_set=True, persistent=False)
     bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
-    bpy.ops.wm.obj_import(filepath=p['in_obj'])
-    obj = bpy.context.selected_objects[0]
-    clean_mesh(obj, p['merge_dist'])
-    bpy.ops.export_scene.fbx(filepath=p['out_fbx'], use_selection=True)
+    bpy.ops.import_scene.gltf(filepath=p['in_glb'])
+    
+    mesh_obj = None
+    for obj in bpy.context.selected_objects:
+        if obj.type == 'MESH':
+            mesh_obj = obj
+            break
+            
+    if mesh_obj is None:
+        raise Exception("Script Error: No mesh object was found after importing the GLB.")
+        
+    clean_mesh(mesh_obj, p['merge_dist'])
+    
+    bpy.ops.export_scene.gltf(filepath=p['out_glb'], export_format='GLB', use_selection=True)
     sys.exit(0)
 except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr); sys.exit(1)
@@ -567,4 +540,4 @@ except Exception as e:
             with open(script_path, 'w') as f: f.write(script)
             _run_blender_script(script_path)
 
-        return (model_output_folder,)
+        return (final_glb_path,)
