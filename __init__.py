@@ -1,11 +1,12 @@
-from .blender_nodes import BlenderDecimate, BlenderUnwrap, ApplyAlbedoAndExport, BlendFBX_Export
+from .blender_nodes import BlenderDecimate, BlenderUnwrap, TextureBake, ApplyAndExportMaps, BlendFBX_Export
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .utils import Voxelize, VoxelSettings, OtherModesSettings
 
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
     "BlenderUnwrap": BlenderUnwrap,
-    "ApplyAlbedoAndExport": ApplyAlbedoAndExport,
+    "TextureBake": TextureBake,
+    "ApplyAndExportMaps": ApplyAndExportMaps,
     "BlendFBX_Export": BlendFBX_Export,
     "BlenderTextureProjection": BlenderTextureProjection,
     "BlenderRenderDepthMap": BlenderRenderDepthMap,
@@ -17,7 +18,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderDecimate": "Blender Decimate",
     "BlenderUnwrap": "Blender Unwrap",
-    "ApplyAlbedoAndExport": "Apply Albedo and Export GLB",
+    "TextureBake": "Blender Bake Maps",
+    "ApplyAndExportMaps": "Apply and Export Maps",
     "BlendFBX_Export": "Export for Blender (FBX + Textures)",
     "BlenderTextureProjection": "Texture Projection Bake (Blender)",
     "BlenderRenderDepthMap": "Render Depth Map (Blender)",

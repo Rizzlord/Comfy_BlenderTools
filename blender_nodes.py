@@ -279,36 +279,227 @@ except Exception as e:
             uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
         return uv_layout_image
 
-class ApplyAlbedoAndExport:
+class TextureBake:
+    RESOLUTIONS = ["512", "1024", "2048", "4096", "8192"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "high_poly_mesh": ("TRIMESH",),
+                "low_poly_mesh": ("TRIMESH",),
+                "bake_normal": ("BOOLEAN", {"default": True}),
+                "bake_ao": ("BOOLEAN", {"default": True}),
+                "resolution": (cls.RESOLUTIONS, {"default": "2048"}),
+                "cage_extrusion": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "margin": ("INT", {"default": 16, "min": 0, "max": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("BAKED_MAPS", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("baked_maps", "normal_map_preview", "ao_map_preview")
+    FUNCTION = "bake"
+    CATEGORY = "Comfy_BlenderTools"
+
+    def bake(self, high_poly_mesh, low_poly_mesh, bake_normal, bake_ao, resolution, cage_extrusion, margin):
+        if not bake_normal and not bake_ao:
+            raise ValueError("No bake type selected. Please enable Normal or AO baking.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            high_poly_path = os.path.join(temp_dir, "high.glb")
+            low_poly_path = os.path.join(temp_dir, "low.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+
+            high_poly_mesh.export(file_obj=high_poly_path)
+            low_poly_mesh.export(file_obj=low_poly_path)
+
+            params = {
+                'high_poly_path': high_poly_path,
+                'low_poly_path': low_poly_path,
+                'temp_dir': temp_dir,
+                'bake_normal': bake_normal,
+                'bake_ao': bake_ao,
+                'resolution': int(resolution),
+                'cage_extrusion': cage_extrusion,
+                'margin': margin
+            }
+
+            script = f"""
+import bpy, sys, os, traceback
+p = {{
+    'high_poly_path': r"{params['high_poly_path']}",
+    'low_poly_path': r"{params['low_poly_path']}",
+    'temp_dir': r"{params['temp_dir']}",
+    'bake_normal': {params['bake_normal']},
+    'bake_ao': {params['bake_ao']},
+    'resolution': {params['resolution']},
+    'cage_extrusion': {params['cage_extrusion']},
+    'margin': {params['margin']}
+}}
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+
+    bpy.ops.import_scene.gltf(filepath=p['high_poly_path'])
+    high_obj = next((obj for obj in bpy.context.selected_objects if obj.type == 'MESH'), None)
+    if not high_obj: raise Exception("No mesh found in high-poly file.")
+    high_obj.name = "HighPoly"
+
+    bpy.ops.import_scene.gltf(filepath=p['low_poly_path'])
+    low_obj = next((obj for obj in bpy.context.selected_objects if obj.type == 'MESH'), None)
+    if not low_obj: raise Exception("No mesh found in low-poly file.")
+    low_obj.name = "LowPoly"
+
+    if not low_obj.data.uv_layers:
+        raise Exception("Low-poly mesh has no UV map. Please use the BlenderUnwrap node first.")
+
+    mat = bpy.data.materials.new(name="BakeMaterial")
+    mat.use_nodes = True
+    if len(low_obj.data.materials) > 0:
+        low_obj.data.materials[0] = mat
+    else:
+        low_obj.data.materials.append(mat)
+    
+    nodes = mat.node_tree.nodes
+    nodes.clear()
+    tex_node = nodes.new('ShaderNodeTexImage')
+    nodes.active = tex_node
+
+    bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.cycles.device = 'CPU'
+
+    bpy.ops.object.select_all(action='DESELECT')
+    high_obj.select_set(True)
+    low_obj.select_set(True)
+    bpy.context.view_layer.objects.active = low_obj
+
+    def do_bake(bake_type_internal, image_name):
+        bake_res = p['resolution']
+        bake_image = bpy.data.images.new(name=image_name, width=bake_res, height=bake_res, alpha=True)
+        tex_node.image = bake_image
+
+        bpy.ops.object.bake(
+            type=bake_type_internal,
+            use_selected_to_active=True,
+            margin=p['margin'],
+            cage_extrusion=p['cage_extrusion'],
+            use_clear=True,
+            normal_space='TANGENT' if bake_type_internal == 'NORMAL' else 'OBJECT'
+        )
+
+        output_path = os.path.join(p['temp_dir'], image_name + ".png")
+        bake_image.filepath_raw = output_path
+        bake_image.file_format = 'PNG'
+        bake_image.save()
+        bpy.data.images.remove(bake_image)
+
+    if p['bake_normal']:
+        do_bake('NORMAL', 'normal_map')
+
+    if p['bake_ao']:
+        do_bake('AO', 'ao_map')
+    
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+            
+            _run_blender_script(script_path)
+            
+            baked_maps = {}
+            dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            normal_map_tensor = dummy_image
+            ao_map_tensor = dummy_image
+
+            def load_image_as_tensor(path):
+                if not os.path.exists(path):
+                    return None
+                img = Image.open(path).convert('RGB')
+                return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+
+            if bake_normal:
+                normal_path = os.path.join(temp_dir, "normal_map.png")
+                tensor = load_image_as_tensor(normal_path)
+                if tensor is not None:
+                    baked_maps['normal'] = tensor
+                    normal_map_tensor = tensor
+            
+            if bake_ao:
+                ao_path = os.path.join(temp_dir, "ao_map.png")
+                tensor = load_image_as_tensor(ao_path)
+                if tensor is not None:
+                    baked_maps['ao'] = tensor
+                    ao_map_tensor = tensor
+
+            return (baked_maps, normal_map_tensor, ao_map_tensor)
+
+
+class ApplyAndExportMaps:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "texture": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "TexturedMesh"})
+                "filename_prefix": ("STRING", {"default": "TexturedMesh"}),
+            },
+            "optional": {
+                "baked_maps": ("BAKED_MAPS",),
+                "albedo_map": ("IMAGE",),
+                "normal_map": ("IMAGE",),
+                "ao_map": ("IMAGE",),
             }
         }
-    RETURN_TYPES, RETURN_NAMES, FUNCTION, CATEGORY, OUTPUT_NODE = ("TRIMESH", "STRING"), ("trimesh", "glb_path"), "apply_albedo_and_export", "Comfy_BlenderTools", True
+    RETURN_TYPES = ("TRIMESH", "STRING")
+    RETURN_NAMES = ("trimesh", "glb_path")
+    FUNCTION = "apply_and_export"
+    CATEGORY = "Comfy_BlenderTools"
+    OUTPUT_NODE = True
 
-    def apply_albedo_and_export(self, trimesh, texture, filename_prefix):
-        pil_image = Image.fromarray((texture[0].cpu().numpy() * 255).astype(np.uint8))
+    def apply_and_export(self, trimesh, filename_prefix, baked_maps=None, albedo_map=None, normal_map=None, ao_map=None):
+        final_maps = {}
+        if baked_maps:
+            final_maps.update(baked_maps)
+        
+        if albedo_map is not None:
+            final_maps['albedo'] = albedo_map
+        if normal_map is not None:
+            final_maps['normal'] = normal_map
+        if ao_map is not None:
+            final_maps['ao'] = ao_map
+
+        if not final_maps:
+            raise ValueError("No maps provided to apply. Connect either baked_maps or individual map inputs.")
+
         textured_mesh = trimesh.copy()
 
         if not isinstance(textured_mesh.visual, trimesh_loader.visual.TextureVisuals):
-            uvs = None
-            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'uv'):
-                uvs = trimesh.visual.uv
+            uvs = getattr(trimesh.visual, 'uv', None)
             textured_mesh.visual = trimesh_loader.visual.TextureVisuals(uv=uvs)
 
         if textured_mesh.visual.material is None:
             textured_mesh.visual.material = trimesh_loader.visual.material.PBRMaterial()
         
-        textured_mesh.visual.material.baseColorTexture = pil_image
+        material = textured_mesh.visual.material
+
+        def tensor_to_pil(tensor):
+            if tensor is None: return None
+            return Image.fromarray((tensor[0].cpu().numpy() * 255).astype(np.uint8))
+
+        if 'albedo' in final_maps:
+            material.baseColorTexture = tensor_to_pil(final_maps['albedo'])
+        if 'normal' in final_maps:
+            material.normalTexture = tensor_to_pil(final_maps['normal'])
+        if 'ao' in final_maps:
+            material.occlusionTexture = tensor_to_pil(final_maps['ao'])
 
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
         output_glb_path_str = os.path.join(full_output_folder, f"{filename}_{counter:05}.glb")
+        
         textured_mesh.export(output_glb_path_str)
+        
         return (textured_mesh, str(Path(subfolder) / f"{filename}_{counter:05}.glb"))
 
 class BlendFBX_Export:
