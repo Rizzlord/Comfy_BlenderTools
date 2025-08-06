@@ -7,7 +7,7 @@ import torch
 from PIL import Image, ImageDraw
 from pathlib import Path
 import math
-from .utils import _run_blender_script
+from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
 class BlenderDecimate:
     @classmethod
@@ -43,7 +43,10 @@ class BlenderDecimate:
                 'tri': triangulate, 'merge_dist': merge_distance
             }
 
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
+
             script = f"""
+{clean_mesh_func_script}
 import bpy, sys
 p = {{
     'i': r"{params['i']}", 'o': r"{params['o']}", 'apply_dec': {params['apply_dec']}, 
@@ -62,24 +65,14 @@ try:
     if mesh_obj is None:
         raise Exception("Script Error: No mesh was found after importing the GLB.")
 
-    bpy.ops.object.select_all(action='DESELECT')
-    mesh_obj.select_set(True)
-    bpy.context.view_layer.objects.active = mesh_obj
     obj = mesh_obj
+    clean_mesh(obj, p['merge_dist'])
 
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    if p['merge_dist'] > 0.0:
-        bpy.ops.mesh.remove_doubles(threshold=p['merge_dist'])
-    
-    bpy.ops.object.mode_set(mode='OBJECT')
     if p['apply_dec'] and p['ratio'] < 1.0:
         mod = obj.modifiers.new(name="DecimateMod", type='DECIMATE')
         mod.ratio = p['ratio']
         mod.use_collapse_triangulate = p['tri']
         bpy.ops.object.modifier_apply(modifier=mod.name)
-
-    bpy.ops.object.shade_smooth()
     
     bpy.ops.export_scene.gltf(filepath=p['o'], export_format='GLB', use_selection=True)
     
@@ -130,27 +123,17 @@ class BlenderUnwrap:
 
     def _get_post_process_script_block(self):
         return """
-    if p['refine_s'] or p['final_merge_dist'] > 0.0:
+    if p['refine_s']:
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_all(action='SELECT')
-        if p['refine_s']:
-            bpy.ops.uv.seams_from_islands()
-            bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
-            bpy.ops.uv.select_all(action='SELECT')
-            bpy.ops.uv.pack_islands(margin=p['margin'])
-        if p['final_merge_dist'] > 0.0:
-            try:
-                bpy.ops.uv.seams_from_islands()
-                bpy.ops.mesh.select_all(action='DESELECT')
-                bpy.ops.mesh.select_mode(type='EDGE')
-                bpy.ops.mesh.select_similar(type='EDGE_SEAM')
-                bpy.ops.mesh.select_mode(type='VERT')
-                bpy.ops.mesh.select_all(action='INVERT')
-                bpy.ops.mesh.remove_doubles(threshold=p['final_merge_dist'], use_unselected=True)
-            except RuntimeError as e:
-                print(f"Warning: Could not perform UV-aware final merge. Reason: {e}")
-            finally:
-                bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.seams_from_islands()
+        bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
+        bpy.ops.uv.select_all(action='SELECT')
+        bpy.ops.uv.pack_islands(margin=p['margin'])
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    if p['final_merge_dist'] > 0.0:
+        clean_mesh(obj, p['final_merge_dist'])
 """
 
     def process_with_blender(self, trimesh, **p):
@@ -161,6 +144,7 @@ class BlenderUnwrap:
             trimesh.export(file_obj=input_mesh_path)
             
             post_process_script = self._get_post_process_script_block()
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
             
             params = {
                 'i': input_mesh_path, 'o': output_mesh_path, 
@@ -172,6 +156,7 @@ class BlenderUnwrap:
             }
 
             script = f"""
+{clean_mesh_func_script}
 import bpy, sys
 p = {{
     'i': r"{params['i']}", 'o': r"{params['o']}", 'unwrap_m': "{params['unwrap_m']}", 
@@ -224,7 +209,7 @@ except Exception as e:
                 process=False
             )
             
-            if not p.get('refine_with_minimum_stretch') and not p.get('final_merge_distance') > 0.0:
+            if not p.get('refine_with_minimum_stretch') and not p.get('final_merge_dist') > 0.0:
                 uv_preview = self.generate_uv_preview(unwrapped_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
                 return (unwrapped_mesh, uv_preview)
             
@@ -233,6 +218,8 @@ except Exception as e:
             unwrapped_mesh.export(file_obj=refine_input)
 
             post_process_script = self._get_post_process_script_block()
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
+            
             post_params = {
                 'i': refine_input, 'o': final_out, 
                 'refine_s': p.get('refine_with_minimum_stretch'),
@@ -241,6 +228,7 @@ except Exception as e:
                 'final_merge_dist': p.get('final_merge_distance')
             }
             post_script = f"""
+{clean_mesh_func_script}
 import bpy, sys
 p = {{
     'i': r"{post_params['i']}", 'o': r"{post_params['o']}", 'refine_s': {post_params['refine_s']},
@@ -250,6 +238,7 @@ p = {{
 try:
     bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
     bpy.ops.wm.obj_import(filepath=p['i'])
+    obj = bpy.context.view_layer.objects.active
     {post_process_script}
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.wm.obj_export(filepath=p['o'], export_uv=True, export_normals=True, export_materials=False)
@@ -510,11 +499,12 @@ class BlendFBX_Export:
                 "trimesh": ("TRIMESH",),
                 "directory": ("STRING", {"default": "output/exported_models"}),
                 "original_filename": ("STRING", {"default": "model.glb"}),
+                "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
             }
         }
     RETURN_TYPES, RETURN_NAMES, FUNCTION, CATEGORY, OUTPUT_NODE = ("STRING",), ("MODEL_FOLDER_PATH",), "export_model_and_textures_separately", "Comfy_BlenderTools", True
 
-    def export_model_and_textures_separately(self, trimesh, directory, original_filename):
+    def export_model_and_textures_separately(self, trimesh, directory, original_filename, merge_distance):
         if trimesh is None:
             return ("Error: No mesh provided.",)
 
@@ -557,15 +547,19 @@ class BlendFBX_Export:
                 return (f"Error exporting intermediate mesh file: {e}",)
             
             script_path = os.path.join(temp_dir, "convert_script.py")
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
             script = f"""
+{clean_mesh_func_script}
 import bpy, sys
 import addon_utils
-in_obj, out_fbx = r'{temp_obj_path}', r'{final_fbx_path}'
+p = {{'in_obj': r'{temp_obj_path}', 'out_fbx': r'{final_fbx_path}', 'merge_dist': {merge_distance}}}
 try:
     addon_utils.enable('io_scene_fbx', default_set=True, persistent=False)
     bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
-    bpy.ops.wm.obj_import(filepath=in_obj)
-    bpy.ops.export_scene.fbx(filepath=out_fbx, use_selection=True)
+    bpy.ops.wm.obj_import(filepath=p['in_obj'])
+    obj = bpy.context.selected_objects[0]
+    clean_mesh(obj, p['merge_dist'])
+    bpy.ops.export_scene.fbx(filepath=p['out_fbx'], use_selection=True)
     sys.exit(0)
 except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr); sys.exit(1)

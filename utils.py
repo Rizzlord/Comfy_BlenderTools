@@ -28,6 +28,22 @@ def get_blender_path():
     
     print(f"INFO: Using fallback Blender executable path: {fallback_path}")
     return fallback_path
+
+def get_blender_clean_mesh_func_script():
+    return """
+def clean_mesh(obj, merge_distance):
+    import bpy
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    if merge_distance > 0.0:
+        bpy.ops.mesh.remove_doubles(threshold=merge_distance)
+    bpy.ops.mesh.customdata_custom_splitnormals_clear()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.shade_smooth()
+"""
     
 def _run_blender_script(script_path):
     blender_exe = get_blender_path()
