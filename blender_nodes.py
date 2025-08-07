@@ -171,24 +171,36 @@ try:
         bpy.data.objects.remove(obj, do_unlink=True)
 
     bpy.ops.wm.obj_import(filepath=p['i'])
-    obj = bpy.context.view_layer.objects.active; bpy.context.view_layer.objects.active = obj; obj.select_set(True); m = obj.data
+    obj = bpy.context.view_layer.objects.active; 
+    bpy.context.view_layer.objects.active = obj; 
+    obj.select_set(True); m = obj.data
 
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.mark_sharp(clear=True); bpy.ops.mesh.mark_seam(clear=True)
+    bpy.ops.mesh.mark_sharp(clear=True); 
+    bpy.ops.mesh.mark_seam(clear=True)
 
     if p['unwrap_m'] == 'Smart UV Project':
-        bpy.ops.uv.smart_project(angle_limit=p['angle_l'], island_margin=p['margin'], correct_aspect=p['correct_a'], scale_to_bounds=True)
+        bpy.ops.uv.smart_project(angle_limit=p['angle_l'], 
+        island_margin=p['margin'], 
+        correct_aspect=p['correct_a'], 
+        scale_to_bounds=True)
+
     elif p['unwrap_m'] == 'Cube Projection':
-        bpy.ops.uv.cube_project(cube_size=1.0, correct_aspect=p['correct_a'], scale_to_bounds=False)
+        bpy.ops.uv.cube_project(cube_size=1.0, 
+        correct_aspect=p['correct_a'], 
+        scale_to_bounds=False)
 
     bpy.ops.uv.select_all(action='SELECT'); bpy.ops.uv.pack_islands(margin=p['margin'])
-    {post_process_script}
     bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.wm.obj_export(filepath=p['o'], export_uv=True, export_normals=True, export_materials=False)
+    {post_process_script}
+    bpy.ops.wm.obj_export(filepath=p['o'], 
+    export_uv=True, export_normals=True, 
+    export_materials=False)
     sys.exit(0)
 except Exception as e: 
-    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    print(f"Blender script failed: {{e}}", 
+    file=sys.stderr)
     sys.exit(1)
 """
             with open(script_path, 'w') as f: f.write(script)
