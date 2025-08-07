@@ -53,7 +53,9 @@ p = {{
     'ratio': {params['ratio']}, 'tri': {params['tri']}, 'merge_dist': {params['merge_dist']}
 }}
 try:
-    bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        
     bpy.ops.import_scene.gltf(filepath=p['i'])
     
     mesh_obj = None
@@ -165,7 +167,9 @@ p = {{
     'final_merge_dist': {params['final_merge_dist']}
 }}
 try:
-    bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
     bpy.ops.wm.obj_import(filepath=p['i'])
     obj = bpy.context.view_layer.objects.active; bpy.context.view_layer.objects.active = obj; obj.select_set(True); m = obj.data
 
@@ -236,7 +240,9 @@ p = {{
     'min_stretch_i': {post_params['min_stretch_i']}, 'final_merge_dist': {post_params['final_merge_dist']}
 }}
 try:
-    bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+
     bpy.ops.wm.obj_import(filepath=p['i'])
     obj = bpy.context.view_layer.objects.active
     {post_process_script}
@@ -285,8 +291,8 @@ class TextureBake:
             }
         }
 
-    RETURN_TYPES = ("BAKED_MAPS", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("baked_maps", "normal_map_preview", "ao_map_preview")
+    RETURN_TYPES = ("TRIMESH", "BAKED_MAPS", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("low_poly_mesh", "baked_maps", "normal_map_preview", "ao_map_preview")
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
@@ -294,49 +300,49 @@ class TextureBake:
         if not bake_normal and not bake_ao:
             raise ValueError("No bake type selected. Please enable Normal or AO baking.")
 
+        original_material = low_poly_mesh.visual.material if hasattr(low_poly_mesh.visual, 'material') else None
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            high_poly_path = os.path.join(temp_dir, "high.glb")
-            low_poly_path = os.path.join(temp_dir, "low.glb")
+            high_poly_path = os.path.join(temp_dir, "high.obj")
+            low_poly_path = os.path.join(temp_dir, "low.obj")
+            final_low_poly_path = os.path.join(temp_dir, "final_low.glb")
             script_path = os.path.join(temp_dir, "s.py")
 
             high_poly_mesh.export(file_obj=high_poly_path)
             low_poly_mesh.export(file_obj=low_poly_path)
 
             params = {
-                'high_poly_path': high_poly_path,
-                'low_poly_path': low_poly_path,
-                'temp_dir': temp_dir,
-                'bake_normal': bake_normal,
-                'bake_ao': bake_ao,
-                'resolution': int(resolution),
-                'cage_extrusion': cage_extrusion,
+                'high_poly_path': high_poly_path, 'low_poly_path': low_poly_path,
+                'final_low_poly_path': final_low_poly_path, 'temp_dir': temp_dir,
+                'bake_normal': bake_normal, 'bake_ao': bake_ao,
+                'resolution': int(resolution), 'cage_extrusion': cage_extrusion,
                 'margin': margin
             }
 
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
+
             script = f"""
+{clean_mesh_func_script}
 import bpy, sys, os, traceback
 p = {{
-    'high_poly_path': r"{params['high_poly_path']}",
-    'low_poly_path': r"{params['low_poly_path']}",
-    'temp_dir': r"{params['temp_dir']}",
-    'bake_normal': {params['bake_normal']},
-    'bake_ao': {params['bake_ao']},
-    'resolution': {params['resolution']},
-    'cage_extrusion': {params['cage_extrusion']},
+    'high_poly_path': r"{params['high_poly_path']}", 'low_poly_path': r"{params['low_poly_path']}",
+    'final_low_poly_path': r"{params['final_low_poly_path']}", 'temp_dir': r"{params['temp_dir']}",
+    'bake_normal': {params['bake_normal']}, 'bake_ao': {params['bake_ao']},
+    'resolution': {params['resolution']}, 'cage_extrusion': {params['cage_extrusion']},
     'margin': {params['margin']}
 }}
+
 try:
-    bpy.ops.wm.read_factory_settings(use_empty=True)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
 
-    bpy.ops.import_scene.gltf(filepath=p['high_poly_path'])
-    high_obj = next((obj for obj in bpy.context.selected_objects if obj.type == 'MESH'), None)
-    if not high_obj: raise Exception("No mesh found in high-poly file.")
-    high_obj.name = "HighPoly"
+    bpy.ops.wm.obj_import(filepath=p['high_poly_path'])
+    high_obj = bpy.context.selected_objects[0]; high_obj.name = "HighPoly"
+    clean_mesh(high_obj, 0.0001)
 
-    bpy.ops.import_scene.gltf(filepath=p['low_poly_path'])
-    low_obj = next((obj for obj in bpy.context.selected_objects if obj.type == 'MESH'), None)
-    if not low_obj: raise Exception("No mesh found in low-poly file.")
-    low_obj.name = "LowPoly"
+    bpy.ops.wm.obj_import(filepath=p['low_poly_path'])
+    low_obj = bpy.context.selected_objects[0]; low_obj.name = "LowPoly"
+    clean_mesh(low_obj, 0.0001)
 
     if not low_obj.data.uv_layers:
         raise Exception("Low-poly mesh has no UV map. Please use the BlenderUnwrap node first.")
@@ -366,14 +372,9 @@ try:
         bake_image = bpy.data.images.new(name=image_name, width=bake_res, height=bake_res, alpha=True)
         tex_node.image = bake_image
 
-        bpy.ops.object.bake(
-            type=bake_type_internal,
-            use_selected_to_active=True,
-            margin=p['margin'],
-            cage_extrusion=p['cage_extrusion'],
-            use_clear=True,
-            normal_space='TANGENT' if bake_type_internal == 'NORMAL' else 'OBJECT'
-        )
+        bpy.ops.object.bake(type=bake_type_internal, use_selected_to_active=True, margin=p['margin'],
+                            cage_extrusion=p['cage_extrusion'], use_clear=True,
+                            normal_space='TANGENT' if bake_type_internal == 'NORMAL' else 'OBJECT')
 
         output_path = os.path.join(p['temp_dir'], image_name + ".png")
         bake_image.filepath_raw = output_path
@@ -381,12 +382,15 @@ try:
         bake_image.save()
         bpy.data.images.remove(bake_image)
 
-    if p['bake_normal']:
-        do_bake('NORMAL', 'normal_map')
-
-    if p['bake_ao']:
-        do_bake('AO', 'ao_map')
+    if p['bake_normal']: do_bake('NORMAL', 'normal_map')
+    if p['bake_ao']: do_bake('AO', 'ao_map')
     
+    clean_mesh(low_obj, 0.0)
+    
+    bpy.ops.object.select_all(action='DESELECT')
+    low_obj.select_set(True)
+    bpy.ops.export_scene.gltf(filepath=p['final_low_poly_path'], export_format='GLB', use_selection=True)
+
     sys.exit(0)
 except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr)
@@ -404,8 +408,7 @@ except Exception as e:
             ao_map_tensor = dummy_image
 
             def load_image_as_tensor(path):
-                if not os.path.exists(path):
-                    return None
+                if not os.path.exists(path): return None
                 img = Image.open(path).convert('RGB')
                 return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
@@ -422,8 +425,13 @@ except Exception as e:
                 if tensor is not None:
                     baked_maps['ao'] = tensor
                     ao_map_tensor = tensor
+            
+            final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
+            
+            if original_material:
+                final_mesh.visual.material = original_material
 
-            return (baked_maps, normal_map_tensor, ao_map_tensor)
+            return (final_mesh, baked_maps, normal_map_tensor, ao_map_tensor)
 
 class ApplyTexturesToMesh:
     @classmethod
@@ -500,11 +508,11 @@ class BlenderExportGLB:
         os.makedirs(final_output_dir, exist_ok=True)
         
         base_filepath = os.path.join(final_output_dir, filename_prefix)
-        final_glb_path = f"{base_filepath}.glb"
         counter = 1
+        final_glb_path = f"{base_filepath}_{counter:05}_.glb"
         while os.path.exists(final_glb_path):
-            final_glb_path = f"{base_filepath}_{counter:05}.glb"
             counter += 1
+            final_glb_path = f"{base_filepath}_{counter:05}_.glb"
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_glb_path = os.path.join(temp_dir, "temp.glb")
@@ -518,7 +526,9 @@ class BlenderExportGLB:
 import bpy, sys
 p = {{'in_glb': r'{temp_glb_path}', 'out_glb': r'{final_glb_path}', 'merge_dist': {merge_distance}}}
 try:
-    bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete(use_global=False)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        
     bpy.ops.import_scene.gltf(filepath=p['in_glb'])
     
     mesh_obj = None
