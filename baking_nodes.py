@@ -20,18 +20,18 @@ class TextureBake:
                 "bake_normal": ("BOOLEAN", {"default": True}),
                 "bake_ao": ("BOOLEAN", {"default": True}),
                 "ao_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
-                "bake_thickness": ("BOOLEAN", {"default": False}),
+                "bake_thickness": ("BOOLEAN", {"default": True}),
                 "thickness_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
-                "bake_cavity": ("BOOLEAN", {"default": False}),
+                "bake_cavity": ("BOOLEAN", {"default": True}),
                 "cavity_contrast": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "cage_extrusion": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "max_ray_distance": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "cage_extrusion": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_ray_distance": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "margin": ("INT", {"default": 16, "min": 0, "max": 64}),
             }
         }
 
-    RETURN_TYPES = ("TRIMESH", "BAKED_MAPS", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("low_poly_mesh", "baked_maps", "normal_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
+    RETURN_TYPES = ("TRIMESH", "BAKED_MAPS", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("low_poly_mesh", "baked_maps", "albedo_map", "rm_map", "normal_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
@@ -39,8 +39,21 @@ class TextureBake:
              bake_thickness, thickness_strength, bake_cavity, cavity_contrast,
              cage_extrusion, max_ray_distance, margin):
 
-        if not any([bake_normal, bake_ao, bake_thickness, bake_cavity]):
-            raise ValueError("No bake type selected. Please enable at least one bake type.")
+        albedo_map_tensor = None
+        rm_map_tensor = None
+        dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+        if hasattr(low_poly_mesh, 'visual') and hasattr(low_poly_mesh.visual, 'material'):
+            mat = low_poly_mesh.visual.material
+            if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
+                pil_img = mat.baseColorTexture.convert('RGB')
+                img_array = np.array(pil_img).astype(np.float32) / 255.0
+                albedo_map_tensor = torch.from_numpy(img_array)[None,]
+            
+            if hasattr(mat, 'metallicRoughnessTexture') and mat.metallicRoughnessTexture is not None:
+                pil_mr_img = mat.metallicRoughnessTexture.convert('RGB')
+                mr_array = np.array(pil_mr_img).astype(np.float32) / 255.0
+                rm_map_tensor = torch.from_numpy(mr_array)[None,]
 
         original_material = low_poly_mesh.visual.material if hasattr(low_poly_mesh.visual, 'material') else None
 
@@ -56,11 +69,11 @@ class TextureBake:
             params = {
                 'high_poly_path': high_poly_path, 'low_poly_path': low_poly_path,
                 'final_low_poly_path': final_low_poly_path, 'temp_dir': temp_dir,
-                'bake_normal': bake_normal, 'bake_ao': bake_ao, 'ao_strength': ao_strength,
-                'bake_thickness': bake_thickness, 'thickness_strength': thickness_strength,
-                'bake_cavity': bake_cavity, 'cavity_contrast': cavity_contrast,
-                'resolution': int(resolution), 'cage_extrusion': cage_extrusion,
-                'max_ray_distance': max_ray_distance, 'margin': margin
+                'bake_normal': bake_normal, 
+                'bake_ao': bake_ao, 'ao_strength': ao_strength, 'bake_thickness': bake_thickness, 
+                'thickness_strength': thickness_strength, 'bake_cavity': bake_cavity, 
+                'cavity_contrast': cavity_contrast, 'resolution': int(resolution), 
+                'cage_extrusion': cage_extrusion, 'max_ray_distance': max_ray_distance, 'margin': margin
             }
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -229,8 +242,13 @@ except Exception as e:
 
             baked_maps = {}
             res_int = int(resolution)
-            dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             
+            if albedo_map_tensor is not None:
+                baked_maps['albedo'] = albedo_map_tensor
+            
+            if rm_map_tensor is not None:
+                baked_maps['rm_map'] = rm_map_tensor
+
             def load_image_as_tensor(path):
                 if not os.path.exists(path): return None
                 img = Image.open(path).convert('RGB')
@@ -266,6 +284,8 @@ except Exception as e:
                 final_mesh.visual.material = original_material
 
             return (final_mesh, baked_maps,
+                    albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
+                    rm_map_tensor if rm_map_tensor is not None else dummy_image,
                     normal_map_tensor if normal_map_tensor is not None else dummy_image,
                     ao_map_tensor if ao_map_tensor is not None else dummy_image,
                     thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
