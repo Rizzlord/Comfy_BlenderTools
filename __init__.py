@@ -1,5 +1,6 @@
-from .blender_nodes import BlenderDecimate, BlenderUnwrap, TextureBake, ApplyTexturesToMesh, BlenderExportGLB
+from .blender_nodes import BlenderDecimate, BlenderUnwrap, ApplyTexturesToMesh, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
+from .baking_nodes import TextureBake
 from .utils import Voxelize, VoxelSettings, OtherModesSettings
 
 NODE_CLASS_MAPPINGS = {
