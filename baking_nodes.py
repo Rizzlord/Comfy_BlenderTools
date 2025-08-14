@@ -30,8 +30,8 @@ class TextureBake:
             }
         }
 
-    RETURN_TYPES = ("TRIMESH", "BAKED_MAPS", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("low_poly_mesh", "baked_maps", "albedo_map", "rm_map", "normal_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
+    RETURN_TYPES = ("TRIMESH", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "rm_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
@@ -240,14 +240,7 @@ except Exception as e:
 
             _run_blender_script(script_path)
 
-            baked_maps = {}
             res_int = int(resolution)
-            
-            if albedo_map_tensor is not None:
-                baked_maps['albedo'] = albedo_map_tensor
-            
-            if rm_map_tensor is not None:
-                baked_maps['rm_map'] = rm_map_tensor
 
             def load_image_as_tensor(path):
                 if not os.path.exists(path): return None
@@ -255,16 +248,9 @@ except Exception as e:
                 return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
             normal_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "normal_map.png"))
-            if normal_map_tensor is not None: baked_maps['normal'] = normal_map_tensor
-
             ao_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "ao_map.png"))
-            if ao_map_tensor is not None: baked_maps['ao'] = ao_map_tensor
-            
             thickness_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "thickness_map.png"))
-            if thickness_map_tensor is not None: baked_maps['thickness'] = thickness_map_tensor
-            
             cavity_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "cavity_map.png"))
-            if cavity_map_tensor is not None: baked_maps['cavity'] = cavity_map_tensor
 
             atc_map_tensor = None
             if any([bake_ao, bake_thickness, bake_cavity]):
@@ -275,18 +261,15 @@ except Exception as e:
                 b_channel = cavity_map_tensor[:, :, :, 0:1] if cavity_map_tensor is not None else black_channel
                 
                 atc_map_tensor = torch.cat([r_channel, g_channel, b_channel], dim=-1)
-                baked_maps['atc'] = atc_map_tensor
-                if ao_map_tensor is not None:
-                     baked_maps['ao'] = atc_map_tensor
 
             final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
             if original_material:
                 final_mesh.visual.material = original_material
 
-            return (final_mesh, baked_maps,
+            return (final_mesh,
                     albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
-                    rm_map_tensor if rm_map_tensor is not None else dummy_image,
                     normal_map_tensor if normal_map_tensor is not None else dummy_image,
+                    rm_map_tensor if rm_map_tensor is not None else dummy_image,
                     ao_map_tensor if ao_map_tensor is not None else dummy_image,
                     thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
                     cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
@@ -320,6 +303,8 @@ class ApplyMaterial:
         material = trimesh_loader.visual.material.PBRMaterial()
 
         def tensor_to_pil(tensor):
+            if tensor is None:
+                return None
             i = 255. * tensor[0].cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             return img.convert("RGB")
@@ -335,15 +320,17 @@ class ApplyMaterial:
             
             img_array = np.array([black, purple], dtype=np.uint8)[pattern]
             return Image.fromarray(img_array, 'RGB')
-        
-        checker_map = None
-        if any(t is None for t in [albedo_map, normal_map, metallic_roughness_map, ao_map]):
-            checker_map = create_checker_map_pil()
 
-        material.baseColorTexture = tensor_to_pil(albedo_map) if albedo_map is not None else checker_map
-        material.normalTexture = tensor_to_pil(normal_map) if normal_map is not None else checker_map
-        material.metallicRoughnessTexture = tensor_to_pil(metallic_roughness_map) if metallic_roughness_map is not None else checker_map
-        material.occlusionTexture = tensor_to_pil(ao_map) if ao_map is not None else checker_map
+        base_color_texture = None
+        if albedo_map is not None:
+            base_color_texture = tensor_to_pil(albedo_map)
+        else:
+            base_color_texture = create_checker_map_pil()
+
+        material.baseColorTexture = base_color_texture
+        material.normalTexture = tensor_to_pil(normal_map)
+        material.metallicRoughnessTexture = tensor_to_pil(metallic_roughness_map)
+        material.occlusionTexture = tensor_to_pil(ao_map)
 
         new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
 
