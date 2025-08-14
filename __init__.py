@@ -1,6 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, ApplyTexturesToMesh, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
-from .baking_nodes import TextureBake
+from .baking_nodes import TextureBake, ApplyMaterial
 from .utils import Voxelize, VoxelSettings, OtherModesSettings
 
 NODE_CLASS_MAPPINGS = {
@@ -8,6 +8,7 @@ NODE_CLASS_MAPPINGS = {
     "BlenderUnwrap": BlenderUnwrap,
     "TextureBake": TextureBake,
     "ApplyTexturesToMesh": ApplyTexturesToMesh,
+    "ApplyMaterial": ApplyMaterial,
     "BlenderExportGLB": BlenderExportGLB,
     "BlenderTextureProjection": BlenderTextureProjection,
     "BlenderRenderDepthMap": BlenderRenderDepthMap,
@@ -21,6 +22,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderUnwrap": "Blender Unwrap",
     "TextureBake": "Blender Bake Maps",
     "ApplyTexturesToMesh": "Apply Textures to Mesh",
+    "ApplyMaterial": "Apply Material",
     "BlenderExportGLB": "Blender Export GLB",
     "BlenderTextureProjection": "Texture Projection Bake (Blender)",
     "BlenderRenderDepthMap": "Render Depth Map (Blender)",

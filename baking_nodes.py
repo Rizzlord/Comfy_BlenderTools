@@ -291,3 +291,60 @@ except Exception as e:
                     thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
                     cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
                     atc_map_tensor if atc_map_tensor is not None else dummy_image)
+        
+class ApplyMaterial:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mesh": ("TRIMESH",),
+            },
+            "optional": {
+                "albedo_map": ("IMAGE",),
+                "normal_map": ("IMAGE",),
+                "metallic_roughness_map": ("IMAGE",),
+                "ao_map": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    RETURN_NAMES = ("mesh",)
+    FUNCTION = "apply"
+    CATEGORY = "Comfy_BlenderTools"
+
+    def apply(self, mesh, albedo_map=None, normal_map=None, metallic_roughness_map=None, ao_map=None):
+        new_mesh = mesh.copy()
+        if not hasattr(new_mesh, 'visual') or not hasattr(new_mesh.visual, 'uv'):
+            raise Exception("Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node.")
+
+        material = trimesh_loader.visual.material.PBRMaterial()
+
+        def tensor_to_pil(tensor):
+            i = 255. * tensor[0].cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            return img.convert("RGB")
+
+        def create_checker_map_pil(size=512, checker_size=64):
+            indices = np.arange(size)
+            x_checkers = np.floor_divide(indices, checker_size)
+            y_checkers = np.floor_divide(indices, checker_size)[:, np.newaxis]
+            pattern = (x_checkers + y_checkers) % 2
+            
+            black = [0, 0, 0]
+            purple = [255, 0, 255]
+            
+            img_array = np.array([black, purple], dtype=np.uint8)[pattern]
+            return Image.fromarray(img_array, 'RGB')
+        
+        checker_map = None
+        if any(t is None for t in [albedo_map, normal_map, metallic_roughness_map, ao_map]):
+            checker_map = create_checker_map_pil()
+
+        material.baseColorTexture = tensor_to_pil(albedo_map) if albedo_map is not None else checker_map
+        material.normalTexture = tensor_to_pil(normal_map) if normal_map is not None else checker_map
+        material.metallicRoughnessTexture = tensor_to_pil(metallic_roughness_map) if metallic_roughness_map is not None else checker_map
+        material.occlusionTexture = tensor_to_pil(ao_map) if ao_map is not None else checker_map
+
+        new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
+
+        return (new_mesh,)
