@@ -335,3 +335,40 @@ class ApplyMaterial:
         new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
 
         return (new_mesh,)
+
+class ExtractMaterial:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mesh": ("TRIMESH",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("albedo_map", "normal_map", "metallic_roughness_map", "ao_map")
+    FUNCTION = "extract"
+    CATEGORY = "Comfy_BlenderTools"
+
+    def extract(self, mesh):
+        dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+        def pil_to_tensor(pil_img):
+            if pil_img is None:
+                return dummy_image
+            
+            pil_img = pil_img.convert('RGB')
+            img_array = np.array(pil_img).astype(np.float32) / 255.0
+            return torch.from_numpy(img_array)[None,]
+
+        if not hasattr(mesh, 'visual') or not hasattr(mesh.visual, 'material'):
+            return (dummy_image, dummy_image, dummy_image, dummy_image)
+
+        mat = mesh.visual.material
+        
+        albedo_map = pil_to_tensor(getattr(mat, 'baseColorTexture', None))
+        normal_map = pil_to_tensor(getattr(mat, 'normalTexture', None))
+        mr_map = pil_to_tensor(getattr(mat, 'metallicRoughnessTexture', None))
+        ao_map = pil_to_tensor(getattr(mat, 'occlusionTexture', None))
+
+        return (albedo_map, normal_map, mr_map, ao_map)
