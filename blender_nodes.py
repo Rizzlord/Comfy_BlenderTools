@@ -1,5 +1,6 @@
 import os
 import tempfile
+import subprocess
 import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
@@ -7,8 +8,169 @@ import torch
 from PIL import Image, ImageDraw
 from pathlib import Path
 import math
-from .utils import _run_blender_script, get_blender_clean_mesh_func_script
+from .utils import _run_blender_script, get_blender_clean_mesh_func_script, get_mof_path, _run_mof_command
 
+class MinistryOfFlatUnwrap:
+    @classmethod
+    def INPUT_TYPES(cls):
+        """
+        Defines the input parameters for the Ministry of Flat Unwrap node
+        based on the provided documentation and settings image.
+        """
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "texture_resolution": ("INT", {"default": 1024, "min": 256, "max": 8192, "step": 256}),
+                "separate_hard_edges": ("BOOLEAN", {"default": False}),
+                "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01, "display": "number"}),
+                "use_normals": ("BOOLEAN", {"default": False}),
+                "udims": ("INT", {"default": 1, "min": 1, "max": 100}),
+                "overlap_identical": ("BOOLEAN", {"default": False}),
+                "overlap_mirrored": ("BOOLEAN", {"default": False}),
+                "world_space_uvs": ("BOOLEAN", {"default": False}),
+                "texture_density": ("INT", {"default": 1024, "min": 64, "max": 8192}),
+                "island_margin": ("FLOAT", {"default": 0.001, "min": 0.0, "max": 0.1, "step": 0.001, "display": "number"}),
+                "refine_with_minimum_stretch": ("BOOLEAN", {"default": False}),
+                "min_stretch_iterations": ("INT", {"default": 10, "min": 0, "max": 256}),
+                "export_uv_layout": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH", "IMAGE")
+    RETURN_NAMES = ("trimesh", "uv_layout_preview")
+    FUNCTION = "unwrap"
+    CATEGORY = "Comfy_BlenderTools"
+
+    def unwrap(self, trimesh, texture_resolution, separate_hard_edges, aspect_ratio, use_normals, udims, overlap_identical, overlap_mirrored, world_space_uvs, texture_density, island_margin, refine_with_minimum_stretch, min_stretch_iterations, export_uv_layout):
+        mof_exe_path = get_mof_path()
+        if not mof_exe_path:
+            print("Ministry of Flat executable not found. Please set the MOF_EXE environment variable.")
+            empty_image = torch.zeros((1, 1024, 1024, 3), dtype=torch.float32)
+            return (trimesh, empty_image)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            initial_input_path = os.path.join(temp_dir, "initial_i.obj")
+            cleaned_input_path = os.path.join(temp_dir, "cleaned_i.obj")
+            mof_output_path = os.path.join(temp_dir, "mof_o.obj")
+            final_output_path = os.path.join(temp_dir, "final_o.obj")
+            
+            trimesh.export(file_obj=initial_input_path)
+
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
+            pre_script_path = os.path.join(temp_dir, "pre_clean.py")
+            pre_script = f"""
+{clean_mesh_func_script}
+import bpy, sys
+p = {{'in_obj': r'{initial_input_path}', 'out_obj': r'{cleaned_input_path}', 'merge_dist': 0.0001}}
+try:
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.ops.wm.obj_import(filepath=p['in_obj'])
+    obj = bpy.context.view_layer.objects.active
+    if obj:
+        clean_mesh(obj, p['merge_dist'])
+        bpy.ops.wm.obj_export(filepath=p['out_obj'], export_uv=True, export_normals=True, export_materials=False)
+    sys.exit(0)
+except Exception as e: 
+    print(f"Blender pre-clean script failed: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(pre_script_path, 'w') as f: f.write(pre_script)
+            _run_blender_script(pre_script_path)
+
+            if not os.path.exists(cleaned_input_path) or os.path.getsize(cleaned_input_path) == 0:
+                raise RuntimeError("Blender pre-clean script failed to produce a valid output OBJ file.")
+
+            command = [
+                mof_exe_path,
+                cleaned_input_path,
+                mof_output_path,
+                "-RESOLUTION", str(texture_resolution),
+                "-SEPARATE", str(separate_hard_edges).upper(),
+                "-ASPECT", str(aspect_ratio),
+                "-NORMALS", str(use_normals).upper(),
+                "-UDIMS", str(udims),
+                "-OVERLAP", str(overlap_identical).upper(),
+                "-MIRROR", str(overlap_mirrored).upper(),
+                "-WORLDSCALE", str(world_space_uvs).upper(),
+                "-DENSITY", str(texture_density),
+                "-SUPRESS", "TRUE"
+            ]
+            
+            mof_exe_dir = os.path.dirname(mof_exe_path)
+            result = subprocess.run(
+                command,
+                capture_output=True, text=True,
+                cwd=mof_exe_dir
+            )
+
+            if result.stdout:
+                print(f"Ministry of Flat stdout: {result.stdout}")
+            if result.stderr:
+                print(f"Ministry of Flat stderr: {result.stderr}")
+
+            if not os.path.exists(mof_output_path) or os.path.getsize(mof_output_path) == 0:
+                raise RuntimeError("Ministry of Flat failed to create an output file. Check logs for details.")
+
+            post_script_path = os.path.join(temp_dir, "post_clean.py")
+            post_script = f"""
+{clean_mesh_func_script}
+import bpy, sys, os
+p = {{'in_obj': r'{mof_output_path}', 'out_obj': r'{final_output_path}', 'merge_dist': 0.0001, 'island_margin': {island_margin}, 'refine_stretch': {refine_with_minimum_stretch}, 'stretch_iterations': {min_stretch_iterations}}}
+try:
+    if not os.path.exists(p['in_obj']) or os.path.getsize(p['in_obj']) == 0:
+        print(f"MoF output file is missing or empty, cannot perform post-clean.", file=sys.stderr)
+        sys.exit(1)
+    for obj in bpy.data.objects:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.ops.wm.obj_import(filepath=p['in_obj'])
+    obj = bpy.context.view_layer.objects.active
+    if obj:
+        clean_mesh(obj, p['merge_dist'])
+        
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.select_all(action='SELECT')
+
+        if p['refine_stretch']:
+            bpy.ops.uv.seams_from_islands()
+            bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['stretch_iterations'])
+
+        bpy.ops.uv.pack_islands(margin=p['island_margin'])
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        bpy.ops.wm.obj_export(filepath=p['out_obj'], export_uv=True, export_normals=True, export_materials=False)
+    sys.exit(0)
+except Exception as e: 
+    print(f"Blender post-clean script failed: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(post_script_path, 'w') as f: f.write(post_script)
+            _run_blender_script(post_script_path)
+
+            if not os.path.exists(final_output_path) or os.path.getsize(final_output_path) == 0:
+                raise RuntimeError("Blender post-clean script failed to produce a valid final output file.")
+
+            processed_mesh = trimesh_loader.load(final_output_path, process=False)
+            
+            uv_preview = self.generate_uv_preview(processed_mesh, texture_resolution, texture_resolution, export_uv_layout)
+            
+            return (processed_mesh, uv_preview)
+
+    def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
+        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
+        if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
+            img = Image.new('RGB', (res_x, res_y), 'black')
+            draw = ImageDraw.Draw(img)
+            if mesh.faces.shape[1] == 3:
+                for face in mesh.faces:
+                    points = [(mesh.visual.uv[i][0] * res_x, (1 - mesh.visual.uv[i][1]) * res_y) for i in face]
+                    points.append(points[0])
+                    draw.line(points, fill='white', width=1)
+            uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+        return uv_layout_image
+    
 class BlenderDecimate:
     @classmethod
     def INPUT_TYPES(cls):

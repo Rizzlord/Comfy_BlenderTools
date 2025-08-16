@@ -1,4 +1,4 @@
-from .blender_nodes import BlenderDecimate, BlenderUnwrap, BlenderExportGLB
+from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, ImageDisplace, SmoothMesh
@@ -6,6 +6,7 @@ from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight,
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
     "BlenderUnwrap": BlenderUnwrap,
+    "MinistryOfFlatUnwrap": MinistryOfFlatUnwrap,
     "TextureBake": TextureBake,
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
@@ -23,6 +24,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderDecimate": "Blender Decimate",
     "BlenderUnwrap": "Blender Unwrap",
+    "MinistryOfFlatUnwrap": "Ministry of Flat Unwrap",
     "TextureBake": "Blender Bake Maps",
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",

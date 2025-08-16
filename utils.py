@@ -46,7 +46,43 @@ def clean_mesh(obj, merge_distance):
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
 """
+
+def get_mof_path():
+    """
+    Finds the path to the Ministry of Flat executable.
+    Searches for the MOF_EXE environment variable.
+    """
+    mof_path = os.environ.get("MOF_EXE")
+    if mof_path and os.path.isfile(mof_path):
+        print(f"INFO: Found Ministry of Flat executable via MOF_EXE: {mof_path}")
+        return mof_path
     
+    # Return None if the executable is not found
+    return None
+
+def _run_mof_command(command):
+    """
+    Executes a command-line process for Ministry of Flat.
+    """
+    try:
+        result = subprocess.run(
+            command,
+            check=True, capture_output=True, text=True
+        )
+        if result.stdout:
+            print(f"Ministry of Flat stdout: {result.stdout}")
+    except subprocess.CalledProcessError as e:
+        error_message = (
+            f"Ministry of Flat execution failed with return code {e.returncode}.\n"
+            f"--- Stderr ---\n{e.stderr}\n"
+            f"--- Stdout ---\n{e.stdout}"
+        )
+        raise RuntimeError(error_message)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Ministry of Flat executable not found. Please set the MOF_EXE environment variable.")
+    except Exception as e:
+        raise RuntimeError(f"An unexpected error occurred while running Ministry of Flat: {e}")
+        
 def _run_blender_script(script_path):
     blender_exe = get_blender_path()
     try:
