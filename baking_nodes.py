@@ -29,6 +29,7 @@ class TextureBake:
                 "cage_extrusion": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_ray_distance": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "margin": ("INT", {"default": 16, "min": 0, "max": 64}),
+                "use_gpu": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -39,7 +40,7 @@ class TextureBake:
 
     def bake(self, high_poly_mesh, low_poly_mesh, resolution, bake_normal, bake_ao, ao_strength,
              bake_thickness, thickness_strength, bake_cavity, cavity_contrast,
-             cage_extrusion, max_ray_distance, margin):
+             cage_extrusion, max_ray_distance, margin, use_gpu):
 
         albedo_map_tensor = None
         rm_map_tensor = None
@@ -75,7 +76,8 @@ class TextureBake:
                 'bake_ao': bake_ao, 'ao_strength': ao_strength, 'bake_thickness': bake_thickness, 
                 'thickness_strength': thickness_strength, 'bake_cavity': bake_cavity, 
                 'cavity_contrast': cavity_contrast, 'resolution': int(resolution), 
-                'cage_extrusion': cage_extrusion, 'max_ray_distance': max_ray_distance, 'margin': margin
+                'cage_extrusion': cage_extrusion, 'max_ray_distance': max_ray_distance, 'margin': margin,
+                'use_gpu': use_gpu
             }
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -88,7 +90,20 @@ p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for 
 def setup_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.context.scene.render.engine = 'CYCLES'
-    bpy.context.scene.cycles.device = 'CPU'
+    if p['use_gpu']:
+        bpy.context.scene.cycles.device = 'GPU'
+        prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.get_devices()
+        activated_gpu = False
+        for device in prefs.devices:
+            if device.type != 'CPU':
+                device.use = True
+                activated_gpu = True
+        if not activated_gpu:
+            print("Warning: use_gpu was True, but no GPU was found for Cycles. Falling back to CPU.", file=sys.stderr)
+            bpy.context.scene.cycles.device = 'CPU'
+    else:
+        bpy.context.scene.cycles.device = 'CPU'
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
 
