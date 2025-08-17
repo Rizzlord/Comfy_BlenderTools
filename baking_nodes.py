@@ -87,23 +87,41 @@ class TextureBake:
 import bpy, sys, os, traceback
 p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
 
-def setup_scene():
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    bpy.context.scene.render.engine = 'CYCLES'
-    if p['use_gpu']:
-        bpy.context.scene.cycles.device = 'GPU'
+def setup_gpu():
+    if not p['use_gpu']:
+        print("GPU baking disabled by user.")
+        bpy.context.scene.cycles.device = 'CPU'
+        return
+
+    try:
         prefs = bpy.context.preferences.addons['cycles'].preferences
+        prefs.compute_device_type = 'NONE'
+
+        device_types = ['OPTIX', 'CUDA', 'HIP', 'METAL', 'ONEAPI']
+        for device_type in device_types:
+            if hasattr(prefs, f'get_devices_for_type'):
+                devices = prefs.get_devices_for_type(device_type)
+                if devices:
+                    prefs.compute_device_type = device_type
+                    print(f"Found and set compute device type to: {{device_type}}")
+                    break
+        
         prefs.get_devices()
-        activated_gpu = False
         for device in prefs.devices:
             if device.type != 'CPU':
                 device.use = True
-                activated_gpu = True
-        if not activated_gpu:
-            print("Warning: use_gpu was True, but no GPU was found for Cycles. Falling back to CPU.", file=sys.stderr)
-            bpy.context.scene.cycles.device = 'CPU'
-    else:
+                print(f"Enabled GPU device: {{device.name}}")
+        
+        bpy.context.scene.cycles.device = 'GPU'
+        print("Successfully set scene device to GPU.")
+    except Exception as e:
+        print(f"Could not setup GPU, falling back to CPU. Error: {{e}}", file=sys.stderr)
         bpy.context.scene.cycles.device = 'CPU'
+
+def setup_scene():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.context.scene.render.engine = 'CYCLES'
+    setup_gpu()
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
 
@@ -691,7 +709,7 @@ try:
     
     bpy.ops.object.select_all(action='DESELECT')
     high_obj.select_set(True)
-    bpy.ops.export_scene.gltf(filepath=p['final_high_poly_path'], use_selection=True, export_colors=True)
+    bpy.ops.export_scene.gltf(filepath=p['final_high_poly_path'], use_selection=True, export_vertex_colors=True)
     
     print("Bake completed successfully")
     sys.exit(0)
