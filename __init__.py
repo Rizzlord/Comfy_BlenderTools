@@ -1,6 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
-from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
+from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages, VertexBake
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, ImageDisplace, SmoothMesh
 
 NODE_CLASS_MAPPINGS = {
@@ -8,6 +8,8 @@ NODE_CLASS_MAPPINGS = {
     "BlenderUnwrap": BlenderUnwrap,
     "MinistryOfFlatUnwrap": MinistryOfFlatUnwrap,
     "TextureBake": TextureBake,
+    "SaveMultiviewImages": SaveMultiviewImages,
+    "LoadMultiviewImages": LoadMultiviewImages,
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
@@ -19,6 +21,7 @@ NODE_CLASS_MAPPINGS = {
     "TextureToHeight": TextureToHeight,
     "ImageDisplace": ImageDisplace,
     "SmoothMesh": SmoothMesh,
+    "VertexBake": VertexBake,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -26,6 +29,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderUnwrap": "Blender Unwrap",
     "MinistryOfFlatUnwrap": "Ministry of Flat Unwrap",
     "TextureBake": "Blender Bake Maps",
+    "SaveMultiviewImages": "Save Multiview Images",
+    "LoadMultiviewImages": "Load Multiview Images",
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
@@ -37,6 +42,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextureToHeight": "Texture To Height Map",
     "ImageDisplace": "Image Displace Mesh",
     "SmoothMesh": "Smooth Mesh",
+    "VertexBake": "Vertex Bake",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
