@@ -1,7 +1,8 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
-from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages, VertexBake
+from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, ImageDisplace, SmoothMesh
+from .vertexbake_nodes import VertexToHighPoly, VertexToLowPoly
 
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
@@ -21,7 +22,8 @@ NODE_CLASS_MAPPINGS = {
     "TextureToHeight": TextureToHeight,
     "ImageDisplace": ImageDisplace,
     "SmoothMesh": SmoothMesh,
-    "VertexBake": VertexBake,
+    "VertexToHighPoly": VertexToHighPoly,
+    "VertexToLowPoly": VertexToLowPoly,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -42,7 +44,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextureToHeight": "Texture To Height Map",
     "ImageDisplace": "Image Displace Mesh",
     "SmoothMesh": "Smooth Mesh",
-    "VertexBake": "Vertex Bake",
+    "VertexToHighPoly": "Project Vertex Color (High Poly)",
+    "VertexToLowPoly": "Bake Vertex to Texture (Low Poly)",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
