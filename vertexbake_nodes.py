@@ -3,6 +3,7 @@ import numpy as np
 import trimesh
 from PIL import Image
 from scipy.spatial import cKDTree
+from scipy.ndimage import distance_transform_edt, grey_dilation
 
 # Helper functions from the original script
 def create_view_matrix(position, target, up):
@@ -70,11 +71,11 @@ class VertexToHighPoly:
                 "multiview_images": ("IMAGE",),
                 "projection_mode": (cls.PROJECTION_MODES, {"default": "orthographic"}),
                 "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
-                "perspective_fov": ("FLOAT", {"default": 49.13, "min": 1.0, "max": 120.0, "step": 0.1}),
-                "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "perspective_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "perspective_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "perspective_fov": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 120.0, "step": 0.1}),
+                "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "perspective_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "perspective_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
             },
             "optional": {
                 "camera_config": ("HY3DCAMERA",),
@@ -189,6 +190,10 @@ class VertexToHighPoly:
         return (mesh,)
 
 class VertexToLowPoly:
+    BLEED_METHODS = ["distance", "dilate"]
+    SUPERSAMPLE_OPTIONS = ["1x", "2x", "4x"]
+    BAKING_MODES = ["Raycast (High Quality)", "Vertex Color Interpolation (Fast)"]
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -196,6 +201,10 @@ class VertexToLowPoly:
                 "high_poly_mesh": ("TRIMESH",),
                 "low_poly_mesh": ("TRIMESH",),
                 "texture_resolution": ("INT", {"default": 2048, "min": 256, "max": 8192, "step": 256}),
+                "supersampling": (cls.SUPERSAMPLE_OPTIONS, {"default": "1x"}),
+                "baking_mode": (cls.BAKING_MODES, {"default": "Raycast (High Quality)"}),
+                "seam_bleed": ("INT", {"default": 16, "min": 0, "max": 64, "step": 1}),
+                "bleed_method": (cls.BLEED_METHODS, {"default": "distance"}),
             }
         }
 
@@ -204,63 +213,134 @@ class VertexToLowPoly:
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools/VertexBake"
 
-    def bake(self, high_poly_mesh, low_poly_mesh, texture_resolution):
-        if not hasattr(high_poly_mesh.visual, 'vertex_colors'):
+    def bake(self, high_poly_mesh, low_poly_mesh, texture_resolution, supersampling, baking_mode, seam_bleed, bleed_method):
+        if not hasattr(high_poly_mesh.visual, 'vertex_colors') or high_poly_mesh.visual.vertex_colors.shape[0] == 0:
             raise ValueError("High-poly mesh does not have vertex colors to bake.")
         
         if not hasattr(low_poly_mesh.visual, 'uv') or low_poly_mesh.visual.uv is None:
-             raise ValueError("Low-poly mesh must have UV coordinates. Use an unwrap node first.")
+                raise ValueError("Low-poly mesh must have UV coordinates. Use an unwrap node first.")
 
         low_poly = low_poly_mesh.copy()
         
+        ss_factor = int(supersampling.replace('x', ''))
+        render_resolution = texture_resolution * ss_factor
+        texture_map = np.zeros((render_resolution, render_resolution, 4), dtype=np.uint8)
+
         kdtree = cKDTree(high_poly_mesh.vertices)
         _, nearest_indices = kdtree.query(low_poly.vertices)
         low_poly_vertex_colors = high_poly_mesh.visual.vertex_colors[nearest_indices]
 
-        texture_map = np.zeros((texture_resolution, texture_resolution, 4), dtype=np.uint8)
+        if baking_mode == "Raycast (High Quality)":
+            intersector = high_poly_mesh.ray
+            low_poly.face_normals
+            low_poly.vertex_normals
         
         uvs = low_poly.visual.uv
         faces = low_poly.faces
+        vertices = low_poly.vertices
+        vertex_normals = low_poly.vertex_normals
 
-        for face in faces:
+        for face_idx, face in enumerate(faces):
             v0_idx, v1_idx, v2_idx = face
             
-            uv0 = uvs[v0_idx] * (texture_resolution - 1)
-            uv1 = uvs[v1_idx] * (texture_resolution - 1)
-            uv2 = uvs[v2_idx] * (texture_resolution - 1)
-            
-            c0 = low_poly_vertex_colors[v0_idx]
-            c1 = low_poly_vertex_colors[v1_idx]
-            c2 = low_poly_vertex_colors[v2_idx]
+            uv0, uv1, uv2 = uvs[[v0_idx, v1_idx, v2_idx]] * (render_resolution - 1)
+            v0, v1, v2 = vertices[[v0_idx, v1_idx, v2_idx]]
             
             min_x = int(max(0, min(uv0[0], uv1[0], uv2[0])))
-            max_x = int(min(texture_resolution - 1, max(uv0[0], uv1[0], uv2[0])))
+            max_x = int(min(render_resolution - 1, max(uv0[0], uv1[0], uv2[0])))
             min_y = int(max(0, min(uv0[1], uv1[1], uv2[1])))
-            max_y = int(min(texture_resolution - 1, max(uv0[1], uv1[1], uv2[1])))
-
-            v0 = uv1 - uv0
-            v1 = uv2 - uv0
-            den = v0[0] * v1[1] - v1[0] * v0[1]
-            if abs(den) < 1e-6: continue
+            max_y = int(min(render_resolution - 1, max(uv0[1], uv1[1], uv2[1])))
             
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    p = np.array([x, y])
-                    v2_p = p - uv0
-                    
-                    w1 = (v2_p[0] * v1[1] - v1[0] * v2_p[1]) / den
-                    w2 = (v0[0] * v2_p[1] - v2_p[0] * v0[1]) / den
-                    w0 = 1.0 - w1 - w2
+            if min_x >= max_x or min_y >= max_y:
+                continue
+            
+            uv_v0, uv_v1 = uv1 - uv0, uv2 - uv0
+            den = uv_v0[0] * uv_v1[1] - uv_v1[0] * uv_v0[1]
+            if abs(den) < 1e-6: continue
 
-                    if w0 >= 0 and w1 >= 0 and w2 >= 0:
-                        color = w0 * c0 + w1 * c1 + w2 * c2
-                        texture_map[texture_resolution - 1 - y, x] = np.clip(color, 0, 255).astype(np.uint8)
+            x_range = np.arange(min_x, max_x + 1)
+            y_range = np.arange(min_y, max_y + 1)
+            grid_x, grid_y = np.meshgrid(x_range, y_range)
+            p = np.stack((grid_x, grid_y), axis=-1)
+
+            uv_p = p - uv0
+            w1 = (uv_p[..., 0] * uv_v1[1] - uv_v1[0] * uv_p[..., 1]) / den
+            w2 = (uv_v0[0] * uv_p[..., 1] - uv_p[..., 0] * uv_v0[1]) / den
+            w0 = 1.0 - w1 - w2
+
+            mask = (w0 >= -1e-4) & (w1 >= -1e-4) & (w2 >= -1e-4)
+            if not mask.any(): continue
+
+            w0_masked, w1_masked, w2_masked = w0[mask], w1[mask], w2[mask]
+
+            if baking_mode == "Raycast (High Quality)":
+                n0, n1, n2 = vertex_normals[[v0_idx, v1_idx, v2_idx]]
+                origins = w0_masked[:, None] * v0 + w1_masked[:, None] * v1 + w2_masked[:, None] * v2
+                normals = w0_masked[:, None] * n0 + w1_masked[:, None] * n1 + w2_masked[:, None] * n2
+                normals /= np.linalg.norm(normals, axis=1)[:, None]
+                
+                origins_offset = origins + normals * 1e-4
+                
+                hit_locs, index_ray, hit_faces = intersector.intersects_location(origins_offset, normals)
+                
+                if len(hit_locs) == 0: continue
+
+                bary = trimesh.triangles.points_to_barycentric(
+                    triangles=high_poly_mesh.triangles[hit_faces],
+                    points=hit_locs
+                )
+                hp_face_verts = high_poly_mesh.faces[hit_faces]
+                hp_colors = high_poly_mesh.visual.vertex_colors[hp_face_verts]
+                
+                final_colors = np.einsum('ij,ijk->ik', bary, hp_colors)
+                pixel_y = render_resolution - 1 - grid_y[mask]
+                pixel_x = grid_x[mask]
+                
+                texture_map[pixel_y[index_ray], pixel_x[index_ray]] = np.clip(final_colors, 0, 255).astype(np.uint8)
+
+            else:
+                c0, c1, c2 = low_poly_vertex_colors[[v0_idx, v1_idx, v2_idx]]
+                final_colors = w0_masked[:, None] * c0 + w1_masked[:, None] * c1 + w2_masked[:, None] * c2
+                pixel_y = render_resolution - 1 - grid_y[mask]
+                pixel_x = grid_x[mask]
+                texture_map[pixel_y, pixel_x] = np.clip(final_colors, 0, 255).astype(np.uint8)
+
+
+        if seam_bleed > 0:
+            bleed_pixels = seam_bleed * ss_factor
+            alpha_channel = texture_map[:, :, 3]
+            filled_mask = alpha_channel > 0
+
+            if bleed_method == "distance":
+                mask_to_fill = alpha_channel == 0
+                distances, indices = distance_transform_edt(mask_to_fill, return_indices=True)
+                bleed_mask = (distances > 0) & (distances <= bleed_pixels)
+                fill_coords_y, fill_coords_x = np.where(bleed_mask)
+                src_coords_y = indices[0, fill_coords_y, fill_coords_x]
+                src_coords_x = indices[1, fill_coords_y, fill_coords_x]
+                texture_map[fill_coords_y, fill_coords_x] = texture_map[src_coords_y, src_coords_x]
+            else:
+                dilation_footprint = np.ones((3, 3), dtype=bool)
+                for _ in range(bleed_pixels):
+                    for i in range(3):
+                        channel = texture_map[:, :, i]
+                        dilated_channel = grey_dilation(channel, footprint=dilation_footprint)
+                        channel[~filled_mask] = dilated_channel[~filled_mask]
+                    filled_mask = grey_dilation(filled_mask, footprint=dilation_footprint)
+                texture_map[:, :, 3][filled_mask] = 255
 
         baked_texture_pil = Image.fromarray(texture_map, 'RGBA')
+
+        if ss_factor > 1:
+            baked_texture_pil = baked_texture_pil.resize(
+                (texture_resolution, texture_resolution), 
+                Image.Resampling.LANCZOS
+            )
         
         material = trimesh.visual.material.PBRMaterial(baseColorTexture=baked_texture_pil)
-        texture_visuals = trimesh.visual.texture.TextureVisuals(uv=low_poly.visual.uv, material=material)
-        low_poly.visual = texture_visuals
+        visuals = trimesh.visual.texture.TextureVisuals(uv=low_poly.visual.uv, material=material)
+        visuals.vertex_colors = low_poly_vertex_colors
+        low_poly.visual = visuals
         
         baked_texture_tensor = torch.from_numpy(np.array(baked_texture_pil).astype(np.float32) / 255.0)[None,]
 
