@@ -71,6 +71,10 @@ class VertexToHighPoly:
                 "projection_mode": (cls.PROJECTION_MODES, {"default": "orthographic"}),
                 "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
                 "perspective_fov": ("FLOAT", {"default": 49.13, "min": 1.0, "max": 120.0, "step": 0.1}),
+                "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "perspective_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "perspective_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
             },
             "optional": {
                 "camera_config": ("HY3DCAMERA",),
@@ -82,7 +86,8 @@ class VertexToHighPoly:
     FUNCTION = "project"
     CATEGORY = "Comfy_BlenderTools/VertexBake"
 
-    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, perspective_fov, camera_config=None):
+    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, perspective_fov, 
+                orthographic_width, orthographic_height, perspective_width, perspective_height, camera_config=None):
         mesh = high_poly_mesh.copy()
         images_pil = [Image.fromarray((img.cpu().numpy() * 255).astype(np.uint8)) for img in multiview_images]
 
@@ -121,13 +126,23 @@ class VertexToHighPoly:
             view_mat = create_view_matrix(cam_pos, cam_target, cam_up)
 
             if projection_mode == 'orthographic':
-                extents = mesh.bounding_box.extents
-                max_extent = float(np.max(extents))
-                ortho_height = max_extent * ortho_scale_mult
-                proj_mat = create_orthographic_projection(ortho_height, aspect_ratio)
-            else: # perspective
-                fov_y_rad = np.radians(perspective_fov)
-                proj_mat = create_perspective_projection(fov_y_rad, aspect_ratio)
+                # Use custom width/height if provided, otherwise use bounding box calculation
+                if orthographic_width > 0 and orthographic_height > 0:
+                    proj_mat = create_orthographic_projection(orthographic_height, orthographic_width / orthographic_height)
+                else:
+                    extents = mesh.bounding_box.extents
+                    max_extent = float(np.max(extents))
+                    ortho_height = max_extent * ortho_scale_mult
+                    proj_mat = create_orthographic_projection(ortho_height, aspect_ratio)
+            else:  # perspective
+                # Use custom width/height if provided, otherwise use FOV
+                if perspective_width > 0 and perspective_height > 0:
+                    # Calculate FOV based on width/height
+                    fov_y_rad = 2 * np.arctan((perspective_height / 2) / cam_distance)
+                    proj_mat = create_perspective_projection(fov_y_rad, perspective_width / perspective_height)
+                else:
+                    fov_y_rad = np.radians(perspective_fov)
+                    proj_mat = create_perspective_projection(fov_y_rad, aspect_ratio)
 
             pvm_matrix = proj_mat @ view_mat
             vertices = mesh.vertices
