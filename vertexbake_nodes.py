@@ -213,43 +213,55 @@ class VertexToLowPoly:
 
         low_poly = low_poly_mesh.copy()
         
-        # Create a KD-Tree for efficient nearest neighbor search on high-poly vertices
         kdtree = cKDTree(high_poly_mesh.vertices)
-        
-        # Get the barycentric coordinates of the low-poly UVs
-        uvs = low_poly.visual.uv
-        
-        # Create an empty texture map
+        _, nearest_indices = kdtree.query(low_poly.vertices)
+        low_poly_vertex_colors = high_poly_mesh.visual.vertex_colors[nearest_indices]
+
         texture_map = np.zeros((texture_resolution, texture_resolution, 4), dtype=np.uint8)
         
-        # Iterate through each pixel of the texture map
-        for y in range(texture_resolution):
-            for x in range(texture_resolution):
-                uv_point = np.array([x / (texture_resolution - 1), 1.0 - y / (texture_resolution - 1)])
-                
-                # Find the closest point on the low-poly mesh surface for this UV coordinate
-                # This is a simplification; a more robust method would use raycasting from the UV map
-                # For now, we find the closest UV vertex and use its corresponding 3D vertex
-                distances = np.linalg.norm(uvs - uv_point, axis=1)
-                closest_uv_idx = np.argmin(distances)
-                
-                # Get the 3D position of the closest vertex on the low-poly mesh
-                low_poly_vertex = low_poly.vertices[closest_uv_idx]
-                
-                # Find the nearest vertex on the high-poly mesh
-                _, nearest_high_poly_idx = kdtree.query(low_poly_vertex)
-                
-                # Get the color from that high-poly vertex
-                color = high_poly_mesh.visual.vertex_colors[nearest_high_poly_idx]
-                texture_map[y, x] = color
+        uvs = low_poly.visual.uv
+        faces = low_poly.faces
 
-        # Convert the numpy array to a PIL Image and apply it as a texture
+        for face in faces:
+            v0_idx, v1_idx, v2_idx = face
+            
+            uv0 = uvs[v0_idx] * (texture_resolution - 1)
+            uv1 = uvs[v1_idx] * (texture_resolution - 1)
+            uv2 = uvs[v2_idx] * (texture_resolution - 1)
+            
+            c0 = low_poly_vertex_colors[v0_idx]
+            c1 = low_poly_vertex_colors[v1_idx]
+            c2 = low_poly_vertex_colors[v2_idx]
+            
+            min_x = int(max(0, min(uv0[0], uv1[0], uv2[0])))
+            max_x = int(min(texture_resolution - 1, max(uv0[0], uv1[0], uv2[0])))
+            min_y = int(max(0, min(uv0[1], uv1[1], uv2[1])))
+            max_y = int(min(texture_resolution - 1, max(uv0[1], uv1[1], uv2[1])))
+
+            v0 = uv1 - uv0
+            v1 = uv2 - uv0
+            den = v0[0] * v1[1] - v1[0] * v0[1]
+            if abs(den) < 1e-6: continue
+            
+            for y in range(min_y, max_y + 1):
+                for x in range(min_x, max_x + 1):
+                    p = np.array([x, y])
+                    v2_p = p - uv0
+                    
+                    w1 = (v2_p[0] * v1[1] - v1[0] * v2_p[1]) / den
+                    w2 = (v0[0] * v2_p[1] - v2_p[0] * v0[1]) / den
+                    w0 = 1.0 - w1 - w2
+
+                    if w0 >= 0 and w1 >= 0 and w2 >= 0:
+                        color = w0 * c0 + w1 * c1 + w2 * c2
+                        texture_map[texture_resolution - 1 - y, x] = np.clip(color, 0, 255).astype(np.uint8)
+
         baked_texture_pil = Image.fromarray(texture_map, 'RGBA')
         
         material = trimesh.visual.material.PBRMaterial(baseColorTexture=baked_texture_pil)
-        low_poly.visual = trimesh.visual.texture.TextureVisuals(uv=low_poly.visual.uv, material=material)
+        texture_visuals = trimesh.visual.texture.TextureVisuals(uv=low_poly.visual.uv, material=material)
+        low_poly.visual = texture_visuals
         
-        # Convert PIL image to tensor for output
         baked_texture_tensor = torch.from_numpy(np.array(baked_texture_pil).astype(np.float32) / 255.0)[None,]
 
         return (low_poly, baked_texture_tensor,)
