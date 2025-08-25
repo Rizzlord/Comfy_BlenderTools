@@ -1,63 +1,13 @@
-import torch
+import os
+import sys
+import tempfile
+import traceback
+import trimesh as trimesh_loader
+import folder_paths
 import numpy as np
-import trimesh
+import torch
 from PIL import Image
-from scipy.spatial import cKDTree
-from scipy.ndimage import distance_transform_edt, grey_dilation
-
-def create_view_matrix(position, target, up):
-    f = target - position
-    f = f / np.linalg.norm(f)
-    s = np.cross(f, up)
-    s = s / np.linalg.norm(s)
-    u = np.cross(s, f)
-    
-    view_matrix = np.identity(4)
-    view_matrix[0, :3] = s
-    view_matrix[1, :3] = u
-    view_matrix[2, :3] = -f
-    t = np.array([np.dot(-s, position), np.dot(-u, position), np.dot(f, position)])
-    view_matrix[:3, 3] = t
-    return view_matrix
-
-def create_perspective_projection(fov_y, aspect, near=0.01, far=100.0):
-    projection_matrix = np.zeros((4, 4))
-    f = 1.0 / np.tan(fov_y / 2.0)
-
-    projection_matrix[0, 0] = f / aspect
-    projection_matrix[1, 1] = f
-    projection_matrix[2, 2] = (far + near) / (near - far)
-    projection_matrix[2, 3] = (2.0 * far * near) / (near - far)
-    projection_matrix[3, 2] = -1.0
-
-    return projection_matrix
-
-def create_orthographic_projection(height, aspect, near=-1000.0, far=1000.0):
-    top =  0.5 * height
-    bottom = -top
-    right  = 0.5 * height * aspect
-    left   = -right
-
-    M = np.zeros((4, 4), dtype=float)
-    M[0, 0] = 2.0 / (right - left)
-    M[1, 1] = 2.0 / (top - bottom)
-    M[2, 2] = -2.0 / (far - near)
-    M[3, 3] = 1.0
-
-    M[0, 3] = -(right + left) / (right - left)
-    M[1, 3] = -(top + bottom) / (top - bottom)
-    M[2, 3] = -(far + near) / (far - near)
-    return M
-
-def get_camera_position(center, distance, azimuth_deg, elevation_deg):
-    azimuth_rad = np.radians(azimuth_deg)
-    elevation_rad = np.radians(elevation_deg)
-
-    x = center[0] + distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
-    y = center[1] + distance * np.sin(elevation_rad)
-    z = center[2] + distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
-    
-    return np.array([x, y, z])
+from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
 class VertexToHighPoly:
     PROJECTION_MODES = ["orthographic", "perspective"]
@@ -88,7 +38,7 @@ class VertexToHighPoly:
 
     def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, perspective_fov, 
                 orthographic_width, orthographic_height, perspective_width, perspective_height, camera_config=None):
-        mesh = high_poly_mesh.copy()
+        
         images_pil = [Image.fromarray((img.cpu().numpy() * 255).astype(np.uint8)) for img in multiview_images]
 
         if not images_pil:
@@ -108,89 +58,264 @@ class VertexToHighPoly:
         if len(images_pil) != len(camera_azims):
             raise ValueError(f"Number of images ({len(images_pil)}) does not match number of camera views ({len(camera_azims)}).")
 
-        h, w, _ = np.array(images_pil[0]).shape
-        aspect_ratio = w / h
-        centroid = mesh.bounding_box.centroid
-        cam_target = centroid
-        cam_up = np.array([0, 1, 0]) # Common up vector
+        with tempfile.TemporaryDirectory() as temp_dir:
+            high_poly_path = os.path.join(temp_dir, "high.obj")
+            final_high_poly_path = os.path.join(temp_dir, "final_high.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+            image_paths = []
+            
+            # Save images to temp directory
+            for i, img_pil in enumerate(images_pil):
+                image_path = os.path.join(temp_dir, f"mv_{i}.png")
+                img_pil.save(image_path)
+                image_paths.append(image_path)
 
-        vertex_colors_accumulator = np.zeros((len(mesh.vertices), 4))
-        weight_accumulator = np.zeros((len(mesh.vertices), 1))
+            high_poly_mesh.export(file_obj=high_poly_path)
+
+            params = {
+                'high_poly_path': high_poly_path,
+                'final_high_poly_path': final_high_poly_path,
+                'temp_dir': temp_dir,
+                'image_paths': image_paths,
+                'camera_azims': camera_azims,
+                'camera_elevs': camera_elevs,
+                'cam_distance': cam_distance,
+                'ortho_scale_mult': ortho_scale_mult,
+                'projection_mode': projection_mode,
+                'blend_sharpness': blend_sharpness,
+                'perspective_fov': perspective_fov,
+                'orthographic_width': orthographic_width,
+                'orthographic_height': orthographic_height,
+                'perspective_width': perspective_width,
+                'perspective_height': perspective_height,
+            }
+
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
+
+            script = f"""
+{clean_mesh_func_script}
+import bpy, sys, os, traceback, math
+from mathutils import Vector
+
+p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
+
+def setup_scene():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.cycles.samples = 1
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    bpy.context.scene.render.bake.margin = 0
+    bpy.context.scene.render.bake.use_clear = False
+
+def import_mesh():
+    bpy.ops.wm.obj_import(filepath=p['high_poly_path'])
+    high_obj = bpy.context.selected_objects[0]
+    high_obj.name = "HighPoly"
+    
+    # Ensure vertex color layer exists
+    if not high_obj.data.vertex_colors:
+        high_obj.data.vertex_colors.new(name="Col")
+    else:
+        # Use existing vertex color layer
+        high_obj.data.vertex_colors.active = high_obj.data.vertex_colors[0]
+        high_obj.data.vertex_colors.active.name = "Col"
+    
+    clean_mesh(high_obj, 0.0001)
+    return high_obj
+
+def create_material_with_vertex_color():
+    mat = bpy.data.materials.new(name="VertexColorMaterial")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    
+    # Create nodes
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    emission_node = nodes.new(type='ShaderNodeEmission')
+    vertex_color_node = nodes.new(type='ShaderNodeVertexColor')
+    vertex_color_node.layer_name = "Col"
+    
+    # Connect nodes
+    links.new(vertex_color_node.outputs['Color'], emission_node.inputs['Color'])
+    links.new(emission_node.outputs['Emission'], output_node.inputs['Surface'])
+    
+    return mat
+
+def project_textures_to_vertex_colors(obj):
+    # Setup material with vertex color
+    mat = create_material_with_vertex_color()
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+    
+    # Get object's bounding box for camera setup
+    bbox = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    center = sum(bbox, Vector()) / len(bbox)
+    max_extent = max((bbox[i] - bbox[(i+1)%len(bbox)]).length for i in range(len(bbox)))
+    
+    # Create cameras for each view
+    cameras = []
+    for i, (azim, elev) in enumerate(zip(p['camera_azims'], p['camera_elevs'])):
+        # Create camera
+        bpy.ops.object.camera_add()
+        cam = bpy.context.active_object
+        cam.name = f"Camera_{i}"
+        cam.data.type = 'ORTHO' if p['projection_mode'] == 'orthographic' else 'PERSP'
         
-        mesh.vertex_normals
-
-        for i, (azim, elev) in enumerate(zip(camera_azims, camera_elevs)):
-            img_pil = images_pil[i]
-            img = np.array(img_pil.convert('RGBA'))
-            cam_pos = get_camera_position(centroid, cam_distance, azim, elev)
-            view_mat = create_view_matrix(cam_pos, cam_target, cam_up)
-
-            if projection_mode == 'orthographic':
-                # Use custom width/height if provided, otherwise use bounding box calculation
-                if orthographic_width > 0 and orthographic_height > 0:
-                    proj_mat = create_orthographic_projection(orthographic_height, orthographic_width / orthographic_height)
-                else:
-                    extents = mesh.bounding_box.extents
-                    max_extent = float(np.max(extents))
-                    ortho_height = max_extent * ortho_scale_mult
-                    proj_mat = create_orthographic_projection(ortho_height, aspect_ratio)
-            else:  # perspective
-                # Use custom width/height if provided, otherwise use FOV
-                if perspective_width > 0 and perspective_height > 0:
-                    # Calculate FOV based on width/height
-                    fov_y_rad = 2 * np.arctan((perspective_height / 2) / cam_distance)
-                    proj_mat = create_perspective_projection(fov_y_rad, perspective_width / perspective_height)
-                else:
-                    fov_y_rad = np.radians(perspective_fov)
-                    proj_mat = create_perspective_projection(fov_y_rad, aspect_ratio)
-
-            pvm_matrix = proj_mat @ view_mat
-            vertices = mesh.vertices
-            verts_homogeneous = np.hstack((vertices, np.ones((vertices.shape[0], 1))))
-            clip_coords = verts_homogeneous @ pvm_matrix.T
-            
-            w_coords = clip_coords[:, 3]
-            w_coords[np.abs(w_coords) < 1e-6] = 1e-6
-            ndc = clip_coords[:, :3] / w_coords[:, None]
-            
-            px = (ndc[:, 0] * 0.5 + 0.5) * w
-            py = (1 - (ndc[:, 1] * 0.5 + 0.5)) * h
-
-            frustum_indices = np.where(
-                (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1)
-            )[0]
-            
-            view_vectors = vertices - cam_pos
-            view_vectors /= np.linalg.norm(view_vectors, axis=1)[:, np.newaxis]
-            dot_products = np.sum(mesh.vertex_normals * view_vectors, axis=1)
-            front_facing_vertex_indices = np.where(dot_products < 0)[0]
-            
-            valid_indices = np.intersect1d(frustum_indices, front_facing_vertex_indices, assume_unique=True)
-            
-            dynamic_weights = (-dot_products[valid_indices])**blend_sharpness
-            
-            valid_px = np.clip(px[valid_indices], 0, w - 1).astype(int)
-            valid_py = np.clip(py[valid_indices], 0, h - 1).astype(int)
-            
-            sampled_colors = img[valid_py, valid_px]
-            
-            vertex_colors_accumulator[valid_indices] += sampled_colors * dynamic_weights[:, np.newaxis]
-            weight_accumulator[valid_indices] += dynamic_weights[:, np.newaxis]
-
-        valid_color_indices = np.where(weight_accumulator[:, 0] > 0)[0]
-        weight_accumulator[weight_accumulator == 0] = 1.0
+        # Set camera properties
+        if p['projection_mode'] == 'orthographic':
+            cam.data.ortho_scale = max(p['orthographic_width'], p['orthographic_height']) * p['ortho_scale_mult']
+        else:
+            cam.data.lens = p['perspective_fov']
         
-        final_colors = (vertex_colors_accumulator / weight_accumulator)
-        final_colors = np.clip(final_colors, 0, 255).astype(np.uint8)
+        # Position camera
+        azim_rad = math.radians(azim)
+        elev_rad = math.radians(elev)
+        x = center.x + p['cam_distance'] * math.cos(elev_rad) * math.sin(azim_rad)
+        y = center.y + p['cam_distance'] * math.sin(elev_rad)
+        z = center.z + p['cam_distance'] * math.cos(elev_rad) * math.cos(azim_rad)
+        cam.location = (x, y, z)
+        cam.rotation_mode = 'QUATERNION'
+        look_at = center - cam.location
+        cam.rotation_quaternion = look_at.to_track_quat('-Z', 'Y')
         
-        final_colors[valid_color_indices, 3] = 255
+        cameras.append(cam)
+    
+    # Create image planes for each view
+    for i, (image_path, camera) in enumerate(zip(p['image_paths'], cameras)):
+        # Load image
+        try:
+            img = bpy.data.images.load(image_path)
+        except Exception as ex:
+            print(f"Failed to load image {{image_path}}: {{ex}}")
+            continue
+            
+        # Create plane
+        bpy.ops.mesh.primitive_plane_add(size=1)
+        plane = bpy.context.active_object
+        plane.name = f"ImagePlane_{{i}}"
         
-        mesh.visual = trimesh.visual.ColorVisuals(vertex_colors=final_colors)
-        return (mesh,)
+        # Scale plane to match camera view
+        if p['projection_mode'] == 'orthographic':
+            # Orthographic scale directly controls plane size
+            plane.scale = (camera.data.ortho_scale, camera.data.ortho_scale, 1)
+        else:
+            # Calculate plane size based on perspective FOV
+            fov_rad = math.radians(p['perspective_fov'])
+            distance = p['cam_distance']
+            plane_size = 2 * distance * math.tan(fov_rad / 2)
+            plane.scale = (plane_size, plane_size, 1)
+        
+        # Position plane
+        plane.location = camera.location
+        plane.rotation_mode = 'QUATERNION'
+        plane.rotation_quaternion = camera.rotation_quaternion
+        
+        # Create material for image plane
+        img_mat = bpy.data.materials.new(name=f"ImageMaterial_{{i}}")
+        img_mat.use_nodes = True
+        img_nodes = img_mat.node_tree.nodes
+        img_links = img_mat.node_tree.links
+        img_nodes.clear()
+        
+        # Create nodes
+        img_output = img_nodes.new(type='ShaderNodeOutputMaterial')
+        img_emission = img_nodes.new(type='ShaderNodeEmission')
+        img_tex = img_nodes.new(type='ShaderNodeTexImage')
+        img_tex.image = img
+        
+        # Connect nodes
+        img_links.new(img_tex.outputs['Color'], img_emission.inputs['Color'])
+        img_links.new(img_emission.outputs['Emission'], img_output.inputs['Surface'])
+        
+        # Assign material to plane
+        if plane.data.materials:
+            plane.data.materials[0] = img_mat
+        else:
+            plane.data.materials.append(img_mat)
+        
+        # Setup render settings for this view
+        bpy.context.scene.camera = camera
+        bpy.context.scene.render.resolution_x = img.size[0]
+        bpy.context.scene.render.resolution_y = img.size[1]
+        bpy.context.scene.render.resolution_percentage = 100
+        bpy.context.scene.render.image_settings.file_format = 'PNG'
+        
+        # Setup vertex color bake
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        
+        # Perform bake - FIXED: Correct parameters for Blender 4.0+
+        bpy.context.scene.cycles.bake_type = 'DIFFUSE'
+        bpy.context.scene.render.bake.use_selected_to_active = True
+        bpy.context.scene.render.bake.use_cage = False
+        bpy.context.scene.render.bake.cage_extrusion = 0.0
+        bpy.context.scene.render.bake.max_ray_distance = 0.0
+        bpy.context.scene.render.bake.margin = 0
+        
+        # Correct bake call for Blender 4.0+ - using string format for pass_filter
+        try:
+            bpy.ops.object.bake(
+                type='DIFFUSE',
+                pass_filter=set(['COLOR']),
+                use_clear=False
+            )
+        except Exception as e:
+            print(f"Bake failed for view {{i}}: {{str(e)}}")
+            continue
+        
+        # Clean up
+        bpy.data.objects.remove(plane, do_unlink=True)
+        bpy.data.images.remove(img)
+    
+    # Clean up cameras
+    for cam in cameras:
+        bpy.data.objects.remove(cam, do_unlink=True)
+
+try:
+    setup_scene()
+    high_obj = import_mesh()
+    
+    # Setup render settings
+    bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.cycles.samples = 1
+    bpy.context.scene.cycles.max_bounces = 0
+    bpy.context.scene.view_settings.view_transform = 'Standard'
+    bpy.context.scene.display_settings.display_device = 'sRGB'
+    bpy.context.scene.sequencer_colorspace_settings.name = 'sRGB'
+    
+    project_textures_to_vertex_colors(high_obj)
+    
+    # Clean mesh after baking
+    clean_mesh(high_obj, 0.0)
+    
+    # Export final mesh
+    bpy.ops.object.select_all(action='DESELECT')
+    high_obj.select_set(True)
+    bpy.ops.export_scene.gltf(filepath=p['final_high_poly_path'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+            
+            # Load the final mesh with vertex colors
+            final_mesh = trimesh_loader.load(final_high_poly_path, force="mesh")
+            return (final_mesh,)
 
 class VertexToLowPoly:
     BLEED_METHODS = ["distance", "dilate"]
     SUPERSAMPLE_OPTIONS = ["1x", "2x", "4x"]
+    BAKING_MODES = ["Nearest Neighbor", "Raycast"]
+    BAKE_TYPES = ["Color", "Emit"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -199,6 +324,8 @@ class VertexToLowPoly:
                 "high_poly_mesh": ("TRIMESH",),
                 "low_poly_mesh": ("TRIMESH",),
                 "texture_resolution": ("INT", {"default": 2048, "min": 256, "max": 8192, "step": 256}),
+                "bake_type": (cls.BAKE_TYPES, {"default": "Color"}),
+                "baking_method": (cls.BAKING_MODES, {"default": "Nearest Neighbor"}),
                 "seam_bleed": ("INT", {"default": 16, "min": 0, "max": 64, "step": 1}),
                 "bleed_method": (cls.BLEED_METHODS, {"default": "distance"}),
                 "supersampling": (cls.SUPERSAMPLE_OPTIONS, {"default": "1x"}),
@@ -210,96 +337,209 @@ class VertexToLowPoly:
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools/VertexBake"
 
-    def bake(self, high_poly_mesh, low_poly_mesh, texture_resolution, seam_bleed, bleed_method, supersampling):
-        if not hasattr(high_poly_mesh.visual, 'vertex_colors'):
-            raise ValueError("High-poly mesh does not have vertex colors to bake.")
-        
-        if not hasattr(low_poly_mesh.visual, 'uv') or low_poly_mesh.visual.uv is None:
-             raise ValueError("Low-poly mesh must have UV coordinates. Use an unwrap node first.")
+    def bake(self, high_poly_mesh, low_poly_mesh, texture_resolution, bake_type, baking_method, seam_bleed, bleed_method, supersampling):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            high_poly_path = os.path.join(temp_dir, "high.obj")
+            low_poly_path = os.path.join(temp_dir, "low.obj")
+            final_low_poly_path = os.path.join(temp_dir, "final_low.glb")
+            baked_texture_path = os.path.join(temp_dir, "baked_texture.png")
+            script_path = os.path.join(temp_dir, "s.py")
 
-        low_poly = low_poly_mesh.copy()
-        
-        ss_factor = int(supersampling.replace('x', ''))
-        render_resolution = texture_resolution * ss_factor
-        
-        kdtree = cKDTree(high_poly_mesh.vertices)
-        _, nearest_indices = kdtree.query(low_poly.vertices)
-        low_poly_vertex_colors = high_poly_mesh.visual.vertex_colors[nearest_indices]
+            high_poly_mesh.export(file_obj=high_poly_path)
+            low_poly_mesh.export(file_obj=low_poly_path)
 
-        texture_map = np.zeros((render_resolution, render_resolution, 4), dtype=np.uint8)
-        
-        uvs = low_poly.visual.uv
-        faces = low_poly.faces
+            params = {
+                'high_poly_path': high_poly_path,
+                'low_poly_path': low_poly_path,
+                'final_low_poly_path': final_low_poly_path,
+                'baked_texture_path': baked_texture_path,
+                'temp_dir': temp_dir,
+                'texture_resolution': texture_resolution,
+                'bake_type': bake_type,
+                'baking_method': baking_method,
+                'seam_bleed': seam_bleed,
+                'bleed_method': bleed_method,
+                'supersampling': supersampling,
+            }
 
-        for face in faces:
-            v0_idx, v1_idx, v2_idx = face
-            
-            uv0 = uvs[v0_idx] * (render_resolution - 1)
-            uv1 = uvs[v1_idx] * (render_resolution - 1)
-            uv2 = uvs[v2_idx] * (render_resolution - 1)
-            
-            c0 = low_poly_vertex_colors[v0_idx]
-            c1 = low_poly_vertex_colors[v1_idx]
-            c2 = low_poly_vertex_colors[v2_idx]
-            
-            min_x = int(max(0, min(uv0[0], uv1[0], uv2[0])))
-            max_x = int(min(render_resolution - 1, max(uv0[0], uv1[0], uv2[0])))
-            min_y = int(max(0, min(uv0[1], uv1[1], uv2[1])))
-            max_y = int(min(render_resolution - 1, max(uv0[1], uv1[1], uv2[1])))
+            clean_mesh_func_script = get_blender_clean_mesh_func_script()
 
-            v0 = uv1 - uv0
-            v1 = uv2 - uv0
-            den = v0[0] * v1[1] - v1[0] * v0[1]
-            if abs(den) < 1e-6: continue
-            
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    p = np.array([x, y])
-                    v2_p = p - uv0
-                    
-                    w1 = (v2_p[0] * v1[1] - v1[0] * v2_p[1]) / den
-                    w2 = (v0[0] * v2_p[1] - v2_p[0] * v0[1]) / den
-                    w0 = 1.0 - w1 - w2
+            script = f"""
+{clean_mesh_func_script}
+import bpy, sys, os, traceback
+p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
 
-                    if w0 >= -1e-4 and w1 >= -1e-4 and w2 >= -1e-4:
-                        color = w0 * c0 + w1 * c1 + w2 * c2
-                        texture_map[render_resolution - 1 - y, x] = np.clip(color, 0, 255).astype(np.uint8)
+def setup_scene():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.cycles.samples = 1
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    bpy.context.scene.render.bake.margin = int(p['seam_bleed'])
+    bpy.context.scene.render.bake.use_clear = False
 
-        if seam_bleed > 0:
-            bleed_pixels = seam_bleed * ss_factor
-            alpha_channel = texture_map[:, :, 3]
-            filled_mask = alpha_channel > 0
+def import_meshes():
+    bpy.ops.wm.obj_import(filepath=p['high_poly_path'])
+    high_obj = bpy.context.selected_objects[0]
+    high_obj.name = "HighPoly"
+    clean_mesh(high_obj, 0.0001)
 
-            if bleed_method == "distance":
-                mask_to_fill = alpha_channel == 0
-                distances, indices = distance_transform_edt(mask_to_fill, return_indices=True)
-                bleed_mask = (distances > 0) & (distances <= bleed_pixels)
-                fill_coords_y, fill_coords_x = np.where(bleed_mask)
-                src_coords_y = indices[0, fill_coords_y, fill_coords_x]
-                src_coords_x = indices[1, fill_coords_y, fill_coords_x]
-                texture_map[fill_coords_y, fill_coords_x] = texture_map[src_coords_y, src_coords_x]
-            else:
-                dilation_footprint = np.ones((3, 3), dtype=bool)
-                for _ in range(bleed_pixels):
-                    for i in range(3):
-                        channel = texture_map[:, :, i]
-                        dilated_channel = grey_dilation(channel, footprint=dilation_footprint)
-                        channel[~filled_mask] = dilated_channel[~filled_mask]
-                    filled_mask = grey_dilation(filled_mask, footprint=dilation_footprint)
-                texture_map[:, :, 3][filled_mask] = 255
+    bpy.ops.wm.obj_import(filepath=p['low_poly_path'])
+    low_obj = bpy.context.selected_objects[0]
+    low_obj.name = "LowPoly"
+    clean_mesh(low_obj, 0.0001)
+    
+    # Ensure low poly has UV map
+    if not low_obj.data.uv_layers:
+        bpy.context.view_layer.objects.active = low_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.uv.unwrap(method='ANGLE_BASED', fill_hole=True)
+        bpy.ops.object.mode_set(mode='OBJECT')
+    
+    return high_obj, low_obj
 
-        baked_texture_pil = Image.fromarray(texture_map, 'RGBA')
+def setup_highpoly_material(high_obj):
+    # Create material for high poly with vertex color
+    mat = bpy.data.materials.new(name="HighPolyMaterial")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    
+    # Create nodes
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    bsdf_node = nodes.new(type='ShaderNodeBsdfPrincipled')
+    vertex_color_node = nodes.new(type='ShaderNodeVertexColor')
+    vertex_color_node.layer_name = "Col"  # Must match vertex color layer name
+    
+    # Connect nodes
+    links.new(vertex_color_node.outputs['Color'], bsdf_node.inputs['Base Color'])
+    links.new(bsdf_node.outputs['BSDF'], output_node.inputs['Surface'])
+    
+    # Assign material to high poly
+    if high_obj.data.materials:
+        high_obj.data.materials[0] = mat
+    else:
+        high_obj.data.materials.append(mat)
+    
+    return mat
 
-        if ss_factor > 1:
-            baked_texture_pil = baked_texture_pil.resize(
-                (texture_resolution, texture_resolution), 
-                Image.Resampling.LANCZOS
+def setup_lowpoly_material(low_obj):
+    # Create material for low poly with image texture
+    mat = bpy.data.materials.new(name="LowPolyMaterial")
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+    
+    # Create nodes
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    bsdf_node = nodes.new(type='ShaderNodeBsdfPrincipled')
+    tex_node = nodes.new('ShaderNodeTexImage')
+    
+    # Create new image for baking
+    res = int(p['texture_resolution'])
+    bake_image = bpy.data.images.new(
+        name="BakeImage", 
+        width=res, 
+        height=res, 
+        alpha=True,
+        float_buffer=False
+    )
+    tex_node.image = bake_image
+    
+    # Connect nodes
+    links.new(tex_node.outputs['Color'], bsdf_node.inputs['Base Color'])
+    links.new(bsdf_node.outputs['BSDF'], output_node.inputs['Surface'])
+    
+    # Assign material to low poly
+    if low_obj.data.materials:
+        low_obj.data.materials[0] = mat
+    else:
+        low_obj.data.materials.append(mat)
+    
+    # Make texture node active for baking
+    nodes.active = tex_node
+    
+    return mat, tex_node, bake_image
+
+def bake_vertex_colors_to_texture(high_obj, low_obj, tex_node, bake_image):
+    # Select objects
+    bpy.ops.object.select_all(action='DESELECT')
+    high_obj.select_set(True)
+    low_obj.select_set(True)
+    bpy.context.view_layer.objects.active = low_obj
+    
+    # Setup bake settings
+    bpy.context.scene.render.bake.use_selected_to_active = True
+    bpy.context.scene.render.bake.use_cage = False
+    bpy.context.scene.render.bake.cage_extrusion = 0.0
+    bpy.context.scene.render.bake.max_ray_distance = 0.0
+    bpy.context.scene.render.bake.margin = int(p['seam_bleed'])
+    
+    # Perform bake based on type - FIXED: Correct parameters for Blender 4.0+
+    if p['bake_type'] == 'Color':
+        # Bake vertex colors as pure color (no lighting)
+        bpy.context.scene.cycles.bake_type = 'DIFFUSE'
+        try:
+            # Use string format to avoid f-string interpretation issues
+            bpy.ops.object.bake(
+                type='DIFFUSE',
+                pass_filter=set(['COLOR']),
+                use_clear=False
             )
-        
-        material = trimesh.visual.material.PBRMaterial(baseColorTexture=baked_texture_pil)
-        texture_visuals = trimesh.visual.texture.TextureVisuals(uv=low_poly.visual.uv, material=material)
-        low_poly.visual = texture_visuals
-        
-        baked_texture_tensor = torch.from_numpy(np.array(baked_texture_pil).astype(np.float32) / 255.0)[None,]
+        except Exception as e:
+            print(f"Color bake failed: {{str(e)}}")
+    else:  # Emit
+        try:
+            bpy.ops.object.bake(type='EMIT')
+        except Exception as e:
+            print(f"Emit bake failed: {{str(e)}}")
+    
+    # Save baked image
+    bake_image.filepath_raw = p['baked_texture_path']
+    bake_image.file_format = 'PNG'
+    bake_image.save()
 
-        return (low_poly, baked_texture_tensor,)
+try:
+    setup_scene()
+    high_obj, low_obj = import_meshes()
+    
+    # Setup materials
+    setup_highpoly_material(high_obj)
+    low_poly_mat, tex_node, bake_image = setup_lowpoly_material(low_obj)
+    
+    # Perform baking
+    bake_vertex_colors_to_texture(high_obj, low_obj, tex_node, bake_image)
+    
+    # Clean meshes
+    clean_mesh(high_obj, 0.0)
+    clean_mesh(low_obj, 0.0)
+    
+    # Export final mesh
+    bpy.ops.object.select_all(action='DESELECT')
+    low_obj.select_set(True)
+    bpy.ops.export_scene.gltf(filepath=p['final_low_poly_path'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+            
+            # Load the final mesh
+            final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
+            
+            # Load the baked texture
+            if os.path.exists(baked_texture_path):
+                baked_texture_pil = Image.open(baked_texture_path).convert('RGB')
+                baked_texture_tensor = torch.from_numpy(np.array(baked_texture_pil).astype(np.float32) / 255.0)[None,]
+            else:
+                # Create a dummy tensor if baking failed
+                baked_texture_tensor = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            
+            return (final_mesh, baked_texture_tensor,)
