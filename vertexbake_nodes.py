@@ -58,6 +58,7 @@ class VertexToHighPoly:
                 "multiview_images": ("IMAGE",),
                 "projection_mode": (cls.PROJECTION_MODES, {"default": "orthographic"}),
                 "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "angle_cutoff": ("FLOAT", {"default": 75.0, "min": 0.0, "max": 90.0, "step": 0.5}),
                 "perspective_fov": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 120.0, "step": 0.1}),
                 "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
                 "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
@@ -74,7 +75,7 @@ class VertexToHighPoly:
     FUNCTION = "project"
     CATEGORY = "Comfy_BlenderTools/VertexBake"
 
-    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, perspective_fov, 
+    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, angle_cutoff, perspective_fov, 
                 orthographic_width, orthographic_height, perspective_width, perspective_height, camera_config=None):
         mesh = high_poly_mesh.copy()
         images_pil = [Image.fromarray((img.cpu().numpy() * 255).astype(np.uint8)) for img in multiview_images]
@@ -151,8 +152,17 @@ class VertexToHighPoly:
             front_facing_vertex_indices = np.where(dot_products < 0)[0]
             
             valid_indices = np.intersect1d(frustum_indices, front_facing_vertex_indices, assume_unique=True)
-            
-            dynamic_weights = (-dot_products[valid_indices])**blend_sharpness
+
+            cos = -dot_products[valid_indices]
+            cos_thres = np.cos(np.deg2rad(angle_cutoff))
+            cos[cos < cos_thres] = 0.0
+            dynamic_weights = np.power(cos, blend_sharpness)
+            keep = dynamic_weights > 0
+            valid_indices = valid_indices[keep]
+            dynamic_weights = dynamic_weights[keep]
+
+            if valid_indices.size == 0:
+                continue
             
             valid_px = np.clip(px[valid_indices], 0, w - 1).astype(int)
             valid_py = np.clip(py[valid_indices], 0, h - 1).astype(int)
@@ -172,7 +182,7 @@ class VertexToHighPoly:
         
         mesh.visual = trimesh.visual.ColorVisuals(vertex_colors=final_colors)
         return (mesh,)
-
+    
 class VertexToLowPoly:
     BLEED_METHODS = ["distance", "dilate"]
     SUPERSAMPLE_OPTIONS = ["1x", "2x", "4x"]
