@@ -42,6 +42,22 @@ def clean_mesh(obj, merge_distance):
     bpy.ops.mesh.select_all(action='SELECT')
     if merge_distance > 0.0:
         bpy.ops.mesh.remove_doubles(threshold=merge_distance)
+
+    bpy.ops.mesh.separate(type='LOOSE')
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    parts = bpy.context.selected_objects
+    if len(parts) > 1:
+        main_part = max(parts, key=lambda p: len(p.data.vertices))
+        for part in parts:
+            part.select_set(part != main_part)
+        bpy.ops.object.delete()
+        bpy.context.view_layer.objects.active = main_part
+        main_part.select_set(True)
+        obj = main_part
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.mesh.customdata_custom_splitnormals_clear()
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()

@@ -3,7 +3,8 @@ from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, ImageDisplace, SmoothMesh
 from .vertexbake_nodes import VertexToHighPoly, VertexToLowPoly
-from .vtxbake_nodes import VertexColorBake
+from .vtxbake_nodes import VertexColorBake, DiffuseHighpolyCol
+
 
 NODE_CLASS_MAPPINGS = {
     "BlenderDecimate": BlenderDecimate,
@@ -25,7 +26,8 @@ NODE_CLASS_MAPPINGS = {
     "SmoothMesh": SmoothMesh,
     "VertexToHighPoly": VertexToHighPoly,
     "VertexToLowPoly": VertexToLowPoly,
-    "VertexColorBake": VertexColorBake
+    "VertexColorBake": VertexColorBake,
+    "DiffuseHighpolyCol": DiffuseHighpolyCol
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -48,7 +50,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SmoothMesh": "Smooth Mesh",
     "VertexToHighPoly": "Project Vertex Color (High Poly)",
     "VertexToLowPoly": "Bake Vertex to Texture (Low Poly)",
-    "VertexColorBake": "Bake Vertex Color"
+    "VertexColorBake": "Bake Vertex Color",
+    "DiffuseHighpolyCol": "Bake Diffuse Color",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
