@@ -37,6 +37,16 @@ def create_orthographic_projection(height, aspect, near=-1000.0, far=1000.0):
     M[2, 3] = -(far + near) / (far - near)
     return M
 
+def create_perspective_projection(fovy_rad, aspect, near=0.1, far=1000.0):
+    f = 1.0 / np.tan(fovy_rad / 2.0)
+    M = np.zeros((4, 4), dtype=float)
+    M[0, 0] = f / aspect
+    M[1, 1] = f
+    M[2, 2] = (far + near) / (near - far)
+    M[3, 2] = -1.0
+    M[2, 3] = (2 * far * near) / (near - far)
+    return M
+
 def get_camera_position(center, distance, azimuth_deg, elevation_deg):
     azimuth_rad = np.radians(azimuth_deg)
     elevation_rad = np.radians(elevation_deg)
@@ -58,7 +68,7 @@ class VertexToHighPoly:
                 "multiview_images": ("IMAGE",),
                 "projection_mode": (cls.PROJECTION_MODES, {"default": "orthographic"}),
                 "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
-                "angle_cutoff": ("FLOAT", {"default": 75.0, "min": 0.0, "max": 90.0, "step": 0.5}),
+                "angle_cutoff": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 180.0, "step": 0.5}),
                 "perspective_fov": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 120.0, "step": 0.1}),
                 "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
                 "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
