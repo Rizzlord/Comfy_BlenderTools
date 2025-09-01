@@ -1,7 +1,7 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, ImageDisplace, SmoothMesh
+from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh
 from .vertexbake_nodes import VertexToHighPoly, VertexToLowPoly
 from .vtxbake_nodes import VertexColorBake, DiffuseHighpolyCol
 
@@ -22,7 +22,7 @@ NODE_CLASS_MAPPINGS = {
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
     "TextureToHeight": TextureToHeight,
-    "ImageDisplace": ImageDisplace,
+    "DisplaceMesh": DisplaceMesh,
     "SmoothMesh": SmoothMesh,
     "VertexToHighPoly": VertexToHighPoly,
     "VertexToLowPoly": VertexToLowPoly,
@@ -46,7 +46,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",
     "TextureToHeight": "Texture To Height Map",
-    "ImageDisplace": "Image Displace Mesh",
+    "DisplaceMesh": "Displace Mesh",
     "SmoothMesh": "Smooth Mesh",
     "VertexToHighPoly": "Project Vertex Color (High Poly)",
     "VertexToLowPoly": "Bake Vertex to Texture (Low Poly)",

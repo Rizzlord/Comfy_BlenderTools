@@ -404,7 +404,7 @@ except Exception as e:
 
         return (height_map_tensor, normal_map_tensor)
 
-class ImageDisplace:
+class DisplaceMesh:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -413,6 +413,7 @@ class ImageDisplace:
                 "strength": ("FLOAT", {"default": 0.01, "min": -10.0, "max": 10.0, "step": 0.001}),
                 "midlevel": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
+                "uv_space": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "displacement_map": ("IMAGE",),
@@ -423,8 +424,8 @@ class ImageDisplace:
     FUNCTION = "displace"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def displace(self, trimesh, strength, midlevel, merge_distance, displacement_map=None):
-        if not hasattr(trimesh.visual, 'uv') or len(trimesh.visual.uv) == 0:
+    def displace(self, trimesh, strength, midlevel, merge_distance, uv_space, displacement_map=None):
+        if uv_space and (not hasattr(trimesh.visual, 'uv') or len(trimesh.visual.uv) == 0):
             raise Exception("Input mesh must have UV coordinates for displacement. Use BlenderUnwrap first.")
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -450,6 +451,7 @@ class ImageDisplace:
                 'strength': strength,
                 'midlevel': midlevel,
                 'merge_distance': merge_distance,
+                'uv_space': uv_space,
             }
             
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -481,12 +483,16 @@ try:
 
     disp_mod = obj.modifiers.new(name="DisplaceMod", type='DISPLACE')
     disp_mod.texture = disp_tex
-    disp_mod.texture_coords = 'UV'
+    
+    if p['uv_space']:
+        disp_mod.texture_coords = 'UV'
+        if not obj.data.uv_layers:
+            raise Exception("Mesh does not have a UV map. Cannot use UV coordinates for displacement.")
+    else:
+        disp_mod.texture_coords = 'LOCAL'
+
     disp_mod.strength = p['strength']
     disp_mod.mid_level = p['midlevel']
-    
-    if not obj.data.uv_layers:
-        raise Exception("Mesh does not have a UV map. Cannot use UV coordinates for displacement.")
     
     bpy.ops.object.modifier_apply(modifier=disp_mod.name)
 
