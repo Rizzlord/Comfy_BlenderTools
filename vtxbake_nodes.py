@@ -11,7 +11,7 @@ from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
 class VertexColorBake:
     RESOLUTIONS = ["512", "1024", "2048", "4096", "8192"]
-    BAKE_TYPES = ["diffuse"]  # Removed "emit"
+    BAKE_TYPES = ["diffuse"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -68,7 +68,6 @@ def clean_mesh(obj, merge_distance):
     bpy.context.view_layer.objects.active = obj
     bpy.context.view_layer.update()
     
-    # Switch to edit mode with proper context
     override = bpy.context.copy()
     override['object'] = obj
     override['active_object'] = obj
@@ -77,7 +76,6 @@ def clean_mesh(obj, merge_distance):
     override['edit_object'] = obj
     with bpy.context.temp_override(**override):
         bpy.ops.object.mode_set(mode='EDIT')
-        # Ensure mesh context for selection
         bpy.ops.mesh.select_mode(type='VERT')
         bpy.ops.mesh.select_all(action='SELECT')
         if merge_distance > 0.0:
@@ -85,12 +83,12 @@ def clean_mesh(obj, merge_distance):
         try:
             bpy.ops.mesh.customdata_custom_splitnormals_clear()
         except:
-            pass  # Skip if no custom split normals
+            pass
         bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
 """
 
-            script = f"""
+            script = f'''
 {clean_mesh_func_script}
 import bpy, sys, os, traceback
 p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
@@ -133,13 +131,11 @@ def setup_scene():
     bpy.context.scene.cycles.samples = 1
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
-    # No light added, direct and indirect light turned off
     bpy.context.scene.cycles.use_direct_light = False
     bpy.context.scene.cycles.use_indirect_light = False
 
 def align_meshes(high_obj, low_obj):
     import bpy
-    # Set origins to geometry center
     bpy.ops.object.select_all(action='DESELECT')
     high_obj.select_set(True)
     bpy.context.view_layer.objects.active = high_obj
@@ -147,9 +143,7 @@ def align_meshes(high_obj, low_obj):
     low_obj.select_set(True)
     bpy.context.view_layer.objects.active = low_obj
     bpy.ops.object.origin_set(type='ORIGIN_CENTER_OF_MASS')
-    # Apply transformations
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-    # Ensure same scale and position
     low_obj.location = high_obj.location
     low_obj.scale = high_obj.scale
 
@@ -159,7 +153,6 @@ def import_meshes():
     high_obj = next(o for o in bpy.context.scene.objects if o.type == 'MESH')
     high_obj.name = "HighPoly"
     
-    # Verify vertex colors exist
     if not high_obj.data.color_attributes:
         raise Exception("High-poly mesh has no vertex colors.")
     
@@ -203,7 +196,6 @@ def execute_bake(bake_type, tex_node):
     if bake_type == 'DIFFUSE':
         bake_kwargs['pass_filter'] = {{'COLOR'}}
 
-    # Ensure proper context for baking
     bpy.ops.object.select_all(action='DESELECT')
     low_obj = [o for o in bpy.context.scene.objects if o.name == "LowPoly"][0]
     high_obj = [o for o in bpy.context.scene.objects if o.name == "HighPoly"][0]
@@ -235,7 +227,7 @@ except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
-"""
+'''
             with open(script_path, 'w') as f:
                 f.write(script)
 
@@ -250,9 +242,9 @@ except Exception as e:
 
             if color_map_tensor is None:
                 print(f"Warning: Failed to load color map at {os.path.join(temp_dir, 'color_map.png')}")
+                final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
                 return (final_mesh, dummy_image)
 
-            # Apply brightness and contrast adjustments
             color_map_tensor = color_map_tensor * brightness
             color_map_tensor = (color_map_tensor - 0.5) * contrast + 0.5
             color_map_tensor = torch.clamp(color_map_tensor, 0.0, 1.0)
@@ -274,10 +266,10 @@ class DiffuseHighpolyCol:
                 "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
                 "angle_cutoff": ("FLOAT", {"default": 75.0, "min": 0.0, "max": 90.0, "step": 0.5}),
                 "perspective_fov": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 120.0, "step": 0.1}),
-                "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
-                "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
-                "perspective_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
-                "perspective_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "orthographic_width": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "orthographic_height": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "perspective_width": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "perspective_height": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01}),
             },
             "optional": {
                 "camera_config": ("HY3DCAMERA",),
@@ -289,7 +281,7 @@ class DiffuseHighpolyCol:
     FUNCTION = "project"
     CATEGORY = "Comfy_BlenderTools/VertexBake"
 
-    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, angle_cutoff, perspective_fov, 
+    def project(self, high_poly_mesh, multiview_images, projection_mode, blend_sharpness, angle_cutoff, perspective_fov,
                 orthographic_width, orthographic_height, perspective_width, perspective_height, camera_config=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             high_poly_path = os.path.join(temp_dir, "high.glb")
@@ -298,8 +290,9 @@ class DiffuseHighpolyCol:
 
             image_paths = []
             for i, img_tensor in enumerate(multiview_images):
-                img_np = np.clip(img_tensor.numpy() * 255.0, 0, 255).astype(np.uint8)
-                print(f"Image {i} min/max: {img_np.min()}, {img_np.max()}")
+                img_np = np.clip(img_tensor.cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+                if img_np.shape[0] == 1:
+                    img_np = img_np.squeeze(0)
                 img = Image.fromarray(img_np)
                 path = os.path.join(temp_dir, f"view_{i}.png")
                 img.save(path)
@@ -334,7 +327,7 @@ class DiffuseHighpolyCol:
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
 
-            script = f"""
+            script = f'''
 {clean_mesh_func_script}
 import bpy
 import numpy as np
@@ -398,7 +391,6 @@ try:
     high_obj.name = "HighPoly"
     clean_mesh(high_obj, 0.0001)
     
-    # Recalculate normals to ensure consistency
     bpy.context.view_layer.objects.active = high_obj
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
@@ -409,11 +401,19 @@ try:
     vertices = np.array([list(v.co) for v in mesh_data.vertices])
     normals = np.array([list(v.normal) for v in mesh_data.vertices])
     
-    # Debug normals
     print(f"Normals shape: {{normals.shape}}")
     print(f"Normals min/max: {{np.min(normals)}}, {{np.max(normals)}}")
     
     centroid = np.mean(vertices, axis=0)
+    radius = np.max(np.linalg.norm(vertices - centroid, axis=1)) + 1e-6
+    if p['projection_mode'] == 'orthographic':
+        p['cam_distance'] = radius * 100
+    else:
+        if not (p['perspective_width'] > 0 and p['perspective_height'] > 0):
+            fovy_rad = np.radians(p['perspective_fov']) / 2
+            p['cam_distance'] = radius / np.tan(fovy_rad) + radius * 0.1
+    print(f"Computed cam_distance: {{p['cam_distance']}}")
+
     vertex_colors_accumulator = np.zeros((vertices.shape[0], 4))
     weight_accumulator = np.zeros((vertices.shape[0], ))
     camera_azims = p['camera_azims']
@@ -421,6 +421,7 @@ try:
     cam_distance = p['cam_distance']
     ortho_scale_mult = p['ortho_scale_mult']
     image_paths = p['image_paths']
+
     for i in range(len(image_paths)):
         azim = camera_azims[i]
         elev = camera_elevs[i]
@@ -430,8 +431,10 @@ try:
         aspect_ratio = w / h
         img_array = np.array(image.pixels).reshape((h, w, 4)) * 255.0
         print(f"Image {{i}} loaded, shape: {{img_array.shape}}, min/max: {{img_array.min()}}, {{img_array.max()}}")
+        
         cam_pos = get_camera_position(centroid, cam_distance, azim, elev)
         view_mat = create_view_matrix(cam_pos, centroid, np.array([0.0, 1.0, 0.0]))
+        
         if p['projection_mode'] == 'orthographic':
             if p['orthographic_width'] > 0 and p['orthographic_height'] > 0:
                 height = p['orthographic_height']
@@ -450,53 +453,71 @@ try:
                 fovy = np.radians(p['perspective_fov'])
                 aspect = aspect_ratio
             proj_mat = create_perspective_projection(fovy, aspect)
+        
         pvm_matrix = proj_mat @ view_mat
         verts_homogeneous = np.hstack((vertices, np.ones((vertices.shape[0], 1))))
         clip_coords = verts_homogeneous @ pvm_matrix.T
+        
         w_coords = clip_coords[:, 3].copy()
-        w_coords[np.abs(w_coords) < 1e-6] = 1e-6
+        positive_w = w_coords > 1e-6
+        w_coords[~positive_w] = 1e-6
         ndc = clip_coords[:, :3] / w_coords[:, None]
+        
         px = (ndc[:, 0] * 0.5 + 0.5) * (w - 1)
         py = (1 - (ndc[:, 1] * 0.5 + 0.5)) * (h - 1)
-        frustum_indices = np.where((np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1))[0]
+        
+        frustum_indices = np.where(positive_w & (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1))[0]
+        
         view_vectors = vertices - cam_pos
         view_vectors /= np.linalg.norm(view_vectors, axis=1)[:, None]
         dot_products = np.sum(normals * view_vectors, axis=1)
         print(f"View {{i}}: Dot products min/max: {{np.min(dot_products)}}, {{np.max(dot_products)}}")
+        
         front_facing_vertex_indices = np.where(dot_products < 0)[0]
         print(f"View {{i}}: Front-facing vertices: {{len(front_facing_vertex_indices)}}")
+        
         valid_indices = np.intersect1d(frustum_indices, front_facing_vertex_indices)
         print(f"View {{i}}: {{len(valid_indices)}} valid vertices")
         if len(valid_indices) == 0:
             continue
+        
         cos = -dot_products[valid_indices]
         cos_thres = np.cos(np.radians(p['angle_cutoff']))
         cos[cos < cos_thres] = 0.0
         dynamic_weights = np.power(cos, p['blend_sharpness'])
+        
         keep = dynamic_weights > 0
         valid_indices = valid_indices[keep]
         dynamic_weights = dynamic_weights[keep]
+        
         if len(valid_indices) == 0:
             print(f"No vertices after weight filtering for view {{i}}")
             continue
+        
         print(f"View {{i}} weights range: {{dynamic_weights.min()}} to {{dynamic_weights.max()}}")
         valid_px = np.clip(px[valid_indices], 0, w - 1).astype(int)
         valid_py = np.clip(py[valid_indices], 0, h - 1).astype(int)
-        sampled_colors = img_array[valid_py, valid_px]
+        sampled_colors = img_array[valid_py, valid_py]
+        
         vertex_colors_accumulator[valid_indices] += sampled_colors * dynamic_weights[:, None]
         weight_accumulator[valid_indices] += dynamic_weights
+
     valid_color_indices = np.where(weight_accumulator > 0)[0]
     weight_accumulator[weight_accumulator == 0] = 1.0
     final_colors = vertex_colors_accumulator / weight_accumulator[:, None]
     final_colors = np.clip(final_colors, 0, 255).astype(np.uint8)
     final_colors[valid_color_indices, 3] = 255
+    
     print(f"Final colors shape: {{final_colors.shape}}, non-zero colors: {{np.sum(final_colors[:, :3] > 0)}}")
+    
     color_attr = mesh_data.color_attributes.new(name="Col", type="BYTE_COLOR", domain="POINT")
     colors_flat = (final_colors.astype(np.float32) / 255.0).ravel()
     color_attr.data.foreach_set("color", colors_flat)
+    
     for i, color in enumerate(color_attr.data):
         if i < 5:
             print(f"Vertex {{i}} color: {{list(color.color)}}")
+    
     bpy.ops.object.select_all(action='DESELECT')
     high_obj.select_set(True)
     bpy.ops.export_scene.gltf(filepath=p['final_high_poly_path'], export_format='GLB', use_selection=True)
@@ -505,7 +526,7 @@ except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
-"""
+'''
             with open(script_path, 'w') as f:
                 f.write(script)
 
