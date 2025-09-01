@@ -410,7 +410,7 @@ class DisplaceMesh:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "strength": ("FLOAT", {"default": 0.01, "min": -10.0, "max": 10.0, "step": 0.001}),
+                "strength": ("FLOAT", {"default": 0.005, "min": -10.0, "max": 10.0, "step": 0.001}),
                 "midlevel": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
                 "uv_space": ("BOOLEAN", {"default": True}),
