@@ -1,7 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
-from .texture_nodes import BlenderTextureProjection, BlenderRenderDepthMap
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh
+from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh
 from .vertexbake_nodes import VertexToHighPoly, VertexToLowPoly
 from .vtxbake_nodes import VertexColorBake, DiffuseHighpolyCol
 
@@ -16,8 +15,6 @@ NODE_CLASS_MAPPINGS = {
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
-    "BlenderTextureProjection": BlenderTextureProjection,
-    "BlenderRenderDepthMap": BlenderRenderDepthMap,
     "Voxelize": Voxelize,
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
@@ -27,7 +24,8 @@ NODE_CLASS_MAPPINGS = {
     "VertexToHighPoly": VertexToHighPoly,
     "VertexToLowPoly": VertexToLowPoly,
     "VertexColorBake": VertexColorBake,
-    "DiffuseHighpolyCol": DiffuseHighpolyCol
+    "DiffuseHighpolyCol": DiffuseHighpolyCol,
+    "ProcessMesh": ProcessMesh
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -40,8 +38,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
-    "BlenderTextureProjection": "Texture Projection Bake (Blender)",
-    "BlenderRenderDepthMap": "Render Depth Map (Blender)",
     "Voxelize": "Blender Remesh",
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",
@@ -52,6 +48,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VertexToLowPoly": "Bake Vertex to Texture (Low Poly)",
     "VertexColorBake": "Bake Vertex Color",
     "DiffuseHighpolyCol": "Bake Diffuse Color",
+    "ProcessMesh": "Process Mesh"
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

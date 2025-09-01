@@ -43,21 +43,6 @@ def clean_mesh(obj, merge_distance):
     if merge_distance > 0.0:
         bpy.ops.mesh.remove_doubles(threshold=merge_distance)
 
-    bpy.ops.mesh.separate(type='LOOSE')
-    bpy.ops.object.mode_set(mode='OBJECT')
-
-    parts = bpy.context.selected_objects
-    if len(parts) > 1:
-        main_part = max(parts, key=lambda p: len(p.data.vertices))
-        for part in parts:
-            part.select_set(part != main_part)
-        bpy.ops.object.delete()
-        bpy.context.view_layer.objects.active = main_part
-        main_part.select_set(True)
-        obj = main_part
-
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.mesh.customdata_custom_splitnormals_clear()
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()
@@ -73,7 +58,6 @@ def get_mof_path():
         print(f"INFO: Found Ministry of Flat executable via MOF_EXE: {mof_path}")
         return mof_path
     
-    # Return None if the executable is not found
     return None
 
 def _run_mof_command(command):
@@ -170,7 +154,7 @@ class Voxelize:
 
             script = f"""
 import bpy, sys, traceback
-p = {{ {", ".join(f'"{k}": {v}' for k, v in script_params.items())} }}
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=p['i'])
@@ -332,14 +316,15 @@ class TextureToHeight:
                 pil_img.save(source_image_path)
 
                 params = {
-                    'image_path': source_image_path,
-                    'output_path': output_normal_path,
                     'strength': normal_strength,
                 }
+                script_params = {k: repr(v) for k, v in params.items()}
+                script_params['image_path'] = repr(source_image_path)
+                script_params['output_path'] = repr(output_normal_path)
 
                 script = f"""
 import bpy, sys, os, traceback
-p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
 
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -445,21 +430,22 @@ class DisplaceMesh:
             img.save(image_path)
             
             params = {
-                'input_mesh': input_mesh_path,
-                'output_mesh': output_mesh_path,
-                'image_path': image_path,
                 'strength': strength,
                 'midlevel': midlevel,
                 'merge_distance': merge_distance,
                 'uv_space': uv_space,
             }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_mesh'] = repr(input_mesh_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
+            script_params['image_path'] = repr(image_path)
             
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
 
             script = f"""
 {clean_mesh_func_script}
 import bpy, sys, os, traceback
-p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
 
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -542,8 +528,6 @@ class SmoothMesh:
             trimesh.export(file_obj=input_mesh_path)
 
             params = {
-                'input_mesh': input_mesh_path,
-                'output_mesh': output_mesh_path,
                 'factor': factor,
                 'repeat': repeat,
                 'axis_x': axis_x,
@@ -551,13 +535,16 @@ class SmoothMesh:
                 'axis_z': axis_z,
                 'merge_distance': merge_distance,
             }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_mesh'] = repr(input_mesh_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
             
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
 
             script = f"""
 {clean_mesh_func_script}
 import bpy, sys, os, traceback
-p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
 
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -580,6 +567,103 @@ try:
     smooth_mod.use_z = p['axis_z']
     
     bpy.ops.object.modifier_apply(modifier=smooth_mod.name)
+
+    bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+                processed_mesh.visual.material = trimesh.visual.material
+
+            return (processed_mesh,)
+
+class ProcessMesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
+                "keep_biggest": ("BOOLEAN", {"default": True}),
+                "fill_holes": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "process"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def process(self, trimesh, merge_distance, keep_biggest, fill_holes):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "i.glb")
+            output_mesh_path = os.path.join(temp_dir, "o.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+            
+            trimesh.export(file_obj=input_mesh_path)
+
+            params = {
+                'merge_distance': merge_distance,
+                'keep_biggest': keep_biggest,
+                'fill_holes': fill_holes,
+            }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_mesh'] = repr(input_mesh_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
+
+            script = f"""
+import bpy, sys, os, traceback
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+    
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj:
+        raise Exception("No mesh found in the imported GLB file.")
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+
+    if p['merge_distance'] > 0.0:
+        bpy.ops.mesh.remove_doubles(threshold=p['merge_distance'])
+
+    if p['keep_biggest']:
+        bpy.ops.mesh.separate(type='LOOSE')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        
+        mesh_objects = [o for o in bpy.context.selected_objects if o.type == 'MESH' and o.data]
+
+        if len(mesh_objects) > 1:
+            biggest = max(mesh_objects, key=lambda o: len(o.data.vertices))
+            
+            for o in mesh_objects:
+                if o != biggest:
+                    bpy.data.objects.remove(o, do_unlink=True)
+            
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = biggest
+            biggest.select_set(True)
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+
+    if p['fill_holes']:
+        bpy.ops.mesh.fill_holes(sides=0)
+
+    bpy.ops.object.mode_set(mode='OBJECT')
 
     bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
     sys.exit(0)
