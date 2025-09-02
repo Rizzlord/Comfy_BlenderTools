@@ -395,10 +395,12 @@ class DisplaceMesh:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
+                "texture_coords": (["Local", "Global", "UV"], {"default": "UV"}),
+                "direction": (["X", "Y", "Z", "Normal", "Custom Normal", "RGB to XYZ"], {"default": "Normal"}),
                 "strength": ("FLOAT", {"default": 0.005, "min": -10.0, "max": 10.0, "step": 0.001}),
                 "midlevel": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
-                "uv_space": ("BOOLEAN", {"default": True}),
+                "texture_scale": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
             },
             "optional": {
                 "displacement_map": ("IMAGE",),
@@ -409,9 +411,9 @@ class DisplaceMesh:
     FUNCTION = "displace"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def displace(self, trimesh, strength, midlevel, merge_distance, uv_space, displacement_map=None):
-        if uv_space and (not hasattr(trimesh.visual, 'uv') or len(trimesh.visual.uv) == 0):
-            raise Exception("Input mesh must have UV coordinates for displacement. Use BlenderUnwrap first.")
+    def displace(self, trimesh, texture_coords, direction, strength, midlevel, merge_distance, texture_scale, displacement_map=None):
+        if texture_coords.upper() == 'UV' and (not hasattr(trimesh.visual, 'uv') or len(trimesh.visual.uv) == 0):
+            raise Exception("Input mesh must have UV coordinates for displacement with 'UV' texture coordinates. Use BlenderUnwrap first.")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
@@ -427,13 +429,30 @@ class DisplaceMesh:
 
             i = 255. * disp_map_tensor[0].cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
+            if displacement_map is not None and texture_scale != 1.0:
+                original_width, original_height = img.size
+                tile_width = int(original_width / texture_scale)
+                tile_height = int(original_height / texture_scale)
+
+                if tile_width > 0 and tile_height > 0:
+                    tile = img.resize((tile_width, tile_height), Image.LANCZOS)
+                    tiled_image = Image.new(img.mode, (original_width, original_height))
+                    
+                    for y in range(0, original_height, tile_height):
+                        for x in range(0, original_width, tile_width):
+                            tiled_image.paste(tile, (x, y))
+                    
+                    img = tiled_image
+
             img.save(image_path)
             
             params = {
                 'strength': strength,
                 'midlevel': midlevel,
                 'merge_distance': merge_distance,
-                'uv_space': uv_space,
+                'texture_coords': texture_coords,
+                'direction': direction,
             }
             script_params = {k: repr(v) for k, v in params.items()}
             script_params['input_mesh'] = repr(input_mesh_path)
@@ -470,12 +489,14 @@ try:
     disp_mod = obj.modifiers.new(name="DisplaceMod", type='DISPLACE')
     disp_mod.texture = disp_tex
     
-    if p['uv_space']:
-        disp_mod.texture_coords = 'UV'
+    disp_mod.texture_coords = p['texture_coords'].upper()
+    if disp_mod.texture_coords == 'UV':
         if not obj.data.uv_layers:
             raise Exception("Mesh does not have a UV map. Cannot use UV coordinates for displacement.")
-    else:
-        disp_mod.texture_coords = 'LOCAL'
+            
+    direction_map = {{ "RGB TO XYZ": "RGB_TO_XYZ" }}
+    blender_direction = direction_map.get(p['direction'].upper(), p['direction'].upper())
+    disp_mod.direction = blender_direction
 
     disp_mod.strength = p['strength']
     disp_mod.mid_level = p['midlevel']
