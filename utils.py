@@ -616,6 +616,7 @@ class ProcessMesh:
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
                 "keep_biggest": ("BOOLEAN", {"default": True}),
                 "fill_holes": ("BOOLEAN", {"default": True}),
+                "recalculate_normals": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -623,7 +624,7 @@ class ProcessMesh:
     FUNCTION = "process"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def process(self, trimesh, merge_distance, keep_biggest, fill_holes):
+    def process(self, trimesh, merge_distance, keep_biggest, fill_holes, recalculate_normals):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
@@ -635,6 +636,7 @@ class ProcessMesh:
                 'merge_distance': merge_distance,
                 'keep_biggest': keep_biggest,
                 'fill_holes': fill_holes,
+                'recalculate_normals': recalculate_normals,
             }
             script_params = {k: repr(v) for k, v in params.items()}
             script_params['input_mesh'] = repr(input_mesh_path)
@@ -660,6 +662,9 @@ try:
 
     if p['merge_distance'] > 0.0:
         bpy.ops.mesh.remove_doubles(threshold=p['merge_distance'])
+
+    if p['recalculate_normals']:
+        bpy.ops.mesh.normals_make_consistent(inside=False)
 
     if p['keep_biggest']:
         bpy.ops.mesh.separate(type='LOOSE')
@@ -703,3 +708,126 @@ except Exception as e:
                 processed_mesh.visual.material = trimesh.visual.material
 
             return (processed_mesh,)
+
+class QuadriflowRemesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "smooth_shading": ("BOOLEAN", {"default": True}),
+                "auto_scale_fix": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "Quadriflow_Settings": ("GROUP",),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "remesh"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def remesh(self, trimesh, smooth_shading, auto_scale_fix, Quadriflow_Settings=None):
+        defaults = {
+            'target_faces': 62000,
+            'mode': 'FACES',
+            'target_ratio': 1.0,
+            'target_edge_length': 0.1,
+            'use_mesh_symmetry': False,
+            'use_preserve_sharp': False,
+            'use_preserve_boundary': True,
+            'preserve_attributes': False,
+            'seed': 0,
+        }
+
+        params = defaults.copy()
+        if Quadriflow_Settings:
+            params.update(Quadriflow_Settings)
+        
+        params.update({
+            'smooth_shading': smooth_shading,
+            'auto_scale_fix': auto_scale_fix
+            })
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "i.glb")
+            output_mesh_path = os.path.join(temp_dir, "o.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+            
+            trimesh.export(file_obj=input_mesh_path)
+
+            quadriflow_props = {k: v for k, v in params.items() if k not in ['smooth_shading', 'auto_scale_fix']}
+
+            script_params = {
+                'input_mesh': repr(input_mesh_path),
+                'output_mesh': repr(output_mesh_path),
+                'quadriflow_props': repr(quadriflow_props),
+                'smooth_shading': repr(params['smooth_shading']),
+                'auto_scale_fix': repr(params['auto_scale_fix'])
+            }
+
+            script = f"""
+import bpy, sys, traceback
+p = {{ {', '.join(f'"{k}": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+    
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj:
+        raise Exception("No mesh found in the imported GLB file.")
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    
+    if p['auto_scale_fix']:
+        scale_factor = 10.0
+        bpy.ops.transform.resize(value=(scale_factor, scale_factor, scale_factor))
+        bpy.ops.object.transform_apply(scale=True, location=False, rotation=False)
+        
+        bpy.ops.object.quadriflow_remesh(**p['quadriflow_props'])
+        
+        bpy.ops.transform.resize(value=(1.0/scale_factor, 1.0/scale_factor, 1.0/scale_factor))
+        bpy.ops.object.transform_apply(scale=True, location=False, rotation=False)
+    else:
+        bpy.ops.object.quadriflow_remesh(**p['quadriflow_props'])
+
+    if p['smooth_shading']:
+        bpy.ops.object.shade_smooth()
+    else:
+        bpy.ops.object.shade_flat()
+
+    bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+            
+            _run_blender_script(script_path)
+            
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            return (processed_mesh,)
+
+class QuadriflowSettings:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "target_faces": ("INT", {"default": 62000, "min": 100, "max": 1000000, "step": 100}),
+            "mode": (['FACES', 'RATIO', 'EDGE'], {"default": 'FACES'}),
+            "target_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01, "display": "number"}),
+            "target_edge_length": ("FLOAT", {"default": 0.1, "min": 0.001, "max": 1.0, "step": 0.001, "display": "number"}),
+            "use_mesh_symmetry": ("BOOLEAN", {"default": False}),
+            "use_preserve_sharp": ("BOOLEAN", {"default": False}),
+            "use_preserve_boundary": ("BOOLEAN", {"default": True}),
+            "preserve_attributes": ("BOOLEAN", {"default": False}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 10000}),
+        }}
+    RETURN_TYPES = ("GROUP",)
+    FUNCTION = "get_settings"
+    CATEGORY = "Comfy_BlenderTools/Utils/Settings"
+    def get_settings(self, **kwargs): return (kwargs,)

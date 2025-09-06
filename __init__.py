@@ -1,6 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh
+from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, QuadriflowRemesh, QuadriflowSettings
 from .vertexbake_nodes import VertexToHighPoly, VertexToLowPoly
 from .vtxbake_nodes import VertexColorBake, DiffuseHighpolyCol
 
@@ -18,6 +18,8 @@ NODE_CLASS_MAPPINGS = {
     "Voxelize": Voxelize,
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
+    "QuadriflowRemesh": QuadriflowRemesh,
+    "QuadriflowSettings": QuadriflowSettings,
     "TextureToHeight": TextureToHeight,
     "DisplaceMesh": DisplaceMesh,
     "SmoothMesh": SmoothMesh,
@@ -41,6 +43,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Voxelize": "Blender Remesh",
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",
+    "QuadriflowRemesh": "Blender Quadriflow Remesh",
+    "QuadriflowSettings": "Remesh Quadriflow Settings",
     "TextureToHeight": "Texture To Height Map",
     "DisplaceMesh": "Displace Mesh",
     "SmoothMesh": "Smooth Mesh",

@@ -177,9 +177,14 @@ class BlenderDecimate:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "apply_decimation": ("BOOLEAN", {"default": True}),
+                "method": (["Collapse", "Un-Subdivide"], {"default": "Collapse"}),
                 "max_face_count": ("INT", {"default": 10000, "min": 100, "max": 10000000, "step": 100}),
+                "iterations": ("INT", {"default": 2, "min": 0, "max": 16}),
                 "triangulate": ("BOOLEAN", {"default": True}),
+                "use_symmetry": ("BOOLEAN", {"default": False}),
+                "symmetry_axis_x": ("BOOLEAN", {"default": True}),
+                "symmetry_axis_y": ("BOOLEAN", {"default": False}),
+                "symmetry_axis_z": ("BOOLEAN", {"default": False}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
             }
         }
@@ -188,10 +193,7 @@ class BlenderDecimate:
     FUNCTION = "decimate"
     CATEGORY = "Comfy_BlenderTools"
 
-    def decimate(self, trimesh, apply_decimation, max_face_count, triangulate, merge_distance):
-        current_faces = len(trimesh.faces)
-        ratio = max_face_count / current_faces if current_faces > 0 else 1.0
-        
+    def decimate(self, trimesh, method, max_face_count, iterations, triangulate, use_symmetry, symmetry_axis_x, symmetry_axis_y, symmetry_axis_z, merge_distance):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
@@ -199,10 +201,15 @@ class BlenderDecimate:
             
             trimesh.export(file_obj=input_mesh_path)
 
+            current_faces = len(trimesh.faces)
+            ratio = max_face_count / current_faces if current_faces > 0 else 1.0
+
             params = {
-                'i': input_mesh_path, 'o': output_mesh_path, 
-                'apply_dec': apply_decimation, 'ratio': min(1.0, ratio), 
-                'tri': triangulate, 'merge_dist': merge_distance
+                'i': input_mesh_path, 'o': output_mesh_path, 'method': method,
+                'ratio': min(1.0, ratio), 'iters': iterations,
+                'tri': triangulate, 'use_sym': use_symmetry,
+                'sym_x': symmetry_axis_x, 'sym_y': symmetry_axis_y, 'sym_z': symmetry_axis_z,
+                'merge_dist': merge_distance
             }
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -211,8 +218,11 @@ class BlenderDecimate:
 {clean_mesh_func_script}
 import bpy, sys
 p = {{
-    'i': r"{params['i']}", 'o': r"{params['o']}", 'apply_dec': {params['apply_dec']}, 
-    'ratio': {params['ratio']}, 'tri': {params['tri']}, 'merge_dist': {params['merge_dist']}
+    'i': r"{params['i']}", 'o': r"{params['o']}", 'method': "{params['method']}",
+    'ratio': {params['ratio']}, 'iters': {params['iters']},
+    'tri': {params['tri']}, 'use_sym': {params['use_sym']},
+    'sym_x': {params['sym_x']}, 'sym_y': {params['sym_y']}, 'sym_z': {params['sym_z']},
+    'merge_dist': {params['merge_dist']}
 }}
 try:
     for obj in bpy.data.objects:
@@ -230,14 +240,39 @@ try:
         raise Exception("Script Error: No mesh was found after importing the GLB.")
 
     obj = mesh_obj
-    clean_mesh(obj, p['merge_dist'])
+    if p['merge_dist'] > 0.0:
+        clean_mesh(obj, p['merge_dist'])
+    
+    apply_modifier = False
+    mod = obj.modifiers.new(name="DecimateMod", type='DECIMATE')
 
-    if p['apply_dec'] and p['ratio'] < 1.0:
-        mod = obj.modifiers.new(name="DecimateMod", type='DECIMATE')
+    if p['method'] == 'Collapse' and p['ratio'] < 1.0:
+        mod.decimate_type = 'COLLAPSE'
         mod.ratio = p['ratio']
         mod.use_collapse_triangulate = p['tri']
+        if p['use_sym']:
+            mod.use_symmetry = True
+            axis = ''
+            if p['sym_x']: axis = 'X'
+            elif p['sym_y']: axis = 'Y'
+            elif p['sym_z']: axis = 'Z'
+            if axis: mod.symmetry_axis = axis
+        apply_modifier = True
+
+    elif p['method'] == 'Un-Subdivide' and p['iters'] > 0:
+        mod.decimate_type = 'UNSUBDIV'
+        mod.iterations = p['iters']
+        apply_modifier = True
+
+    if apply_modifier:
+        bpy.context.view_layer.objects.active = obj
         bpy.ops.object.modifier_apply(modifier=mod.name)
+    else:
+        obj.modifiers.remove(mod)
     
+    if p['merge_dist'] > 0.0:
+        clean_mesh(obj, p['merge_dist'])
+
     bpy.ops.export_scene.gltf(filepath=p['o'], export_format='GLB', use_selection=True)
     
     sys.exit(0)
