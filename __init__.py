@@ -47,7 +47,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SmoothMesh": "Smooth Mesh",
     "VertexToHighPoly": "Project Vertex Color (High Poly)",
     "VertexColorBake": "Bake Vertex Color",
-    "ProcessMesh": "Process Mesh"
+    "ProcessMesh": "Process Mesh",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

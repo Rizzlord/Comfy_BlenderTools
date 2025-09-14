@@ -296,10 +296,12 @@ class BlenderUnwrap:
             "required": {
                 "trimesh": ("TRIMESH",),
                 "unwrap_method": (cls.UNWRAP_METHODS, {"default": "Smart UV Project"}),
+                "pack_with_xatlas": ("BOOLEAN", {"default": False}),
                 "export_uv_layout": ("BOOLEAN", {"default": True}),
                 "texture_resolution": (cls.TEXTURE_RESOLUTIONS, {"default": "1024"}),
                 "pixel_margin": ("INT", {"default": 0, "min": 0, "max": 64}),
                 "angle_limit": ("FLOAT", {"default": 66.0, "min": 0.0, "max": 90.0, "step": 0.1}),
+                "average_islands_scale": ("BOOLEAN", {"default": True}),
                 "refine_with_minimum_stretch": ("BOOLEAN", {"default": False}),
                 "min_stretch_iterations": ("INT", {"default": 10, "min": 0, "max": 256}),
                 "final_merge_distance": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
@@ -322,14 +324,24 @@ class BlenderUnwrap:
 
     def _get_post_process_script_block(self):
         return """
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.uv.select_all(action='SELECT')
     if p['refine_s']:
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
         bpy.ops.uv.seams_from_islands()
         bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
-        bpy.ops.uv.select_all(action='SELECT')
-        bpy.ops.uv.pack_islands(margin=p['margin'])
-        bpy.ops.object.mode_set(mode='OBJECT')
+    
+    if p['do_blender_pack']:
+        if bpy.app.version >= (3, 6, 0):
+            if p['avg_scale']:
+                bpy.ops.uv.average_islands_scale()
+                bpy.ops.uv.pack_islands(margin=p['margin'], scale=True)
+            else:
+                bpy.ops.uv.pack_islands(margin=p['margin'], scale=False)
+        else:
+            bpy.ops.uv.pack_islands(margin=p['margin'], average_islands_scale=p['avg_scale'])
+
+    bpy.ops.object.mode_set(mode='OBJECT')
 
     if p['final_merge_dist'] > 0.0:
         clean_mesh(obj, p['final_merge_dist'])
@@ -342,6 +354,7 @@ class BlenderUnwrap:
             script_path = os.path.join(temp_dir, "s.py")
             trimesh.export(file_obj=input_mesh_path)
             
+            pack_with_xatlas = p.get("pack_with_xatlas", False)
             post_process_script = self._get_post_process_script_block()
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
             
@@ -351,7 +364,9 @@ class BlenderUnwrap:
                 'angle_l': p.get('angle_limit', 66.0) * (math.pi / 180.0), 
                 'margin': p.get('pixel_margin', 0) / int(p.get('texture_resolution', 1024)),
                 'correct_a': p.get('correct_aspect'), 'min_stretch_i': p.get('min_stretch_iterations'), 
-                'final_merge_dist': p.get('final_merge_distance')
+                'final_merge_dist': p.get('final_merge_distance'),
+                'avg_scale': p.get('average_islands_scale', True),
+                'do_blender_pack': not pack_with_xatlas
             }
 
             script = f"""
@@ -361,7 +376,9 @@ p = {{
     'i': r"{params['i']}", 'o': r"{params['o']}", 'unwrap_m': "{params['unwrap_m']}", 
     'refine_s': {params['refine_s']}, 'angle_l': {params['angle_l']}, 'margin': {params['margin']},
     'correct_a': {params['correct_a']}, 'min_stretch_i': {params['min_stretch_i']}, 
-    'final_merge_dist': {params['final_merge_dist']}
+    'final_merge_dist': {params['final_merge_dist']},
+    'avg_scale': {params['avg_scale']},
+    'do_blender_pack': {params['do_blender_pack']}
 }}
 try:
     for obj in bpy.data.objects:
@@ -388,8 +405,6 @@ try:
         correct_aspect=p['correct_a'], 
         scale_to_bounds=False)
 
-    bpy.ops.uv.select_all(action='SELECT'); bpy.ops.uv.pack_islands(margin=p['margin'])
-    bpy.ops.object.mode_set(mode='OBJECT')
     {post_process_script}
     bpy.ops.wm.obj_export(filepath=p['o'], 
     export_uv=True, export_normals=True, 
@@ -404,8 +419,13 @@ except Exception as e:
             _run_blender_script(script_path)
 
             processed_mesh = trimesh_loader.load(output_mesh_path, process=False)
-            uv_preview = self.generate_uv_preview(processed_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
-            return (processed_mesh, uv_preview)
+            
+            final_mesh = processed_mesh
+            if pack_with_xatlas:
+                final_mesh = self.xatlas_pack_only(processed_mesh, **p)
+
+            uv_preview = self.generate_uv_preview(final_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
+            return (final_mesh, uv_preview)
 
     def process_with_xatlas(self, trimesh, **p):
         try:
@@ -422,7 +442,7 @@ except Exception as e:
                 process=False
             )
             
-            if not p.get('refine_with_minimum_stretch') and not p.get('final_merge_dist') > 0.0:
+            if not p.get('refine_with_minimum_stretch') and not p.get('final_merge_distance', 0.0) > 0.0 and not p.get('average_islands_scale', True):
                 uv_preview = self.generate_uv_preview(unwrapped_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
                 return (unwrapped_mesh, uv_preview)
             
@@ -438,7 +458,9 @@ except Exception as e:
                 'refine_s': p.get('refine_with_minimum_stretch'),
                 'margin': p.get('pixel_margin', 0) / int(p.get('texture_resolution', 1024)), 
                 'correct_a': p.get('correct_aspect'), 'min_stretch_i': p.get('min_stretch_iterations'), 
-                'final_merge_dist': p.get('final_merge_distance')
+                'final_merge_dist': p.get('final_merge_distance'),
+                'avg_scale': p.get('average_islands_scale', True),
+                'do_blender_pack': True
             }
             post_script = f"""
 {clean_mesh_func_script}
@@ -446,7 +468,9 @@ import bpy, sys
 p = {{
     'i': r"{post_params['i']}", 'o': r"{post_params['o']}", 'refine_s': {post_params['refine_s']},
     'margin': {post_params['margin']}, 'correct_a': {post_params['correct_a']}, 
-    'min_stretch_i': {post_params['min_stretch_i']}, 'final_merge_dist': {post_params['final_merge_dist']}
+    'min_stretch_i': {post_params['min_stretch_i']}, 'final_merge_dist': {post_params['final_merge_dist']},
+    'avg_scale': {post_params['avg_scale']},
+    'do_blender_pack': {post_params['do_blender_pack']}
 }}
 try:
     for obj in bpy.data.objects:
@@ -470,6 +494,40 @@ except Exception as e:
             uv_preview = self.generate_uv_preview(final_mesh, int(p.get('texture_resolution')), int(p.get('texture_resolution')), p.get('export_uv_layout'))
             return (final_mesh, uv_preview)
 
+    def xatlas_pack_only(self, mesh, **p):
+        try:
+            import xatlas
+            import numpy as np
+        except ImportError:
+            raise ImportError("xatlas or numpy not installed. Please run: pip install xatlas numpy")
+
+        if not hasattr(mesh.visual, 'uv') or len(mesh.visual.uv) == 0:
+            return mesh
+
+        vertices_np = np.array(mesh.vertices, dtype=np.float32)
+        faces_np = np.array(mesh.faces, dtype=np.uint32)
+        uvs_np = np.array(mesh.visual.uv, dtype=np.float32)
+
+        atlas = xatlas.Atlas()
+        
+        atlas.add_mesh(vertices_np, faces_np, uvs=uvs_np)
+
+        pack_options = xatlas.PackOptions()
+        pack_options.resolution = int(p.get('texture_resolution', 1024))
+        pack_options.padding = p.get('pixel_margin', 0)
+        
+        atlas.generate(pack_options=pack_options)
+        
+        vmapping, indices, uvs = atlas[0]
+
+        packed_mesh = trimesh_loader.Trimesh(
+            vertices=mesh.vertices[vmapping],
+            faces=indices,
+            visual=trimesh_loader.visual.TextureVisuals(uv=uvs),
+            process=False
+        )
+        return packed_mesh
+
     def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
         uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
         if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
@@ -482,7 +540,7 @@ except Exception as e:
                     draw.line(points, fill='white', width=1)
             uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
         return uv_layout_image
-
+        
 class BlenderExportGLB:
     @classmethod
     def INPUT_TYPES(cls):
