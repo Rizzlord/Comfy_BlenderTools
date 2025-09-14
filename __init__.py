@@ -1,6 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, QuadriflowRemesh, QuadriflowSettings
+from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh
 from .vertexbake_nodes import VertexToHighPoly, VertexColorBake
 
 
@@ -25,6 +25,8 @@ NODE_CLASS_MAPPINGS = {
     "VertexToHighPoly": VertexToHighPoly,
     "VertexColorBake": VertexColorBake,
     "ProcessMesh": ProcessMesh,
+    "MirrorMesh": MirrorMesh,
+    "SubdivisionMesh": SubdivisionMesh,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -48,6 +50,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VertexToHighPoly": "Project Vertex Color (High Poly)",
     "VertexColorBake": "Bake Vertex Color",
     "ProcessMesh": "Process Mesh",
+    "MirrorMesh": "Mirror Mesh",
+    "SubdivisionMesh": "Subdivision Surface",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

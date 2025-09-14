@@ -49,10 +49,6 @@ def clean_mesh(obj, merge_distance):
 """
 
 def get_mof_path():
-    """
-    Finds the path to the Ministry of Flat executable.
-    Searches for the MOF_EXE environment variable.
-    """
     mof_path = os.environ.get("MOF_EXE")
     if mof_path and os.path.isfile(mof_path):
         print(f"INFO: Found Ministry of Flat executable via MOF_EXE: {mof_path}")
@@ -61,9 +57,6 @@ def get_mof_path():
     return None
 
 def _run_mof_command(command):
-    """
-    Executes a command-line process for Ministry of Flat.
-    """
     try:
         result = subprocess.run(
             command,
@@ -690,6 +683,194 @@ try:
         bpy.ops.mesh.fill_holes(sides=0)
 
     bpy.ops.object.mode_set(mode='OBJECT')
+
+    bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+                processed_mesh.visual.material = trimesh.visual.material
+
+            return (processed_mesh,)
+
+class MirrorMesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "axis_x": ("BOOLEAN", {"default": True}),
+                "axis_y": ("BOOLEAN", {"default": False}),
+                "axis_z": ("BOOLEAN", {"default": False}),
+                "use_clip": ("BOOLEAN", {"default": True}),
+                "use_merge": ("BOOLEAN", {"default": True}),
+                "merge_threshold": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "mirror"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def mirror(self, trimesh, axis_x, axis_y, axis_z, use_clip, use_merge, merge_threshold):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "i.glb")
+            output_mesh_path = os.path.join(temp_dir, "o.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+            
+            trimesh.export(file_obj=input_mesh_path)
+
+            params = {
+                'axis_x': axis_x, 'axis_y': axis_y, 'axis_z': axis_z,
+                'use_clip': use_clip, 'use_merge': use_merge,
+                'merge_threshold': merge_threshold,
+            }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_mesh'] = repr(input_mesh_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
+
+            script = f"""
+import bpy, sys, os, traceback
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+    
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj: raise Exception("No mesh found in the imported GLB file.")
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+
+    if p['axis_x']:
+        bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(1, 0, 0), clear_outer=True)
+    if p['axis_y']:
+        bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(0, 1, 0), clear_outer=True)
+    if p['axis_z']:
+        bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(0, 0, 1), clear_outer=True)
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    mod = obj.modifiers.new(name="MirrorMod", type='MIRROR')
+    mod.use_axis[0] = p['axis_x']
+    mod.use_axis[1] = p['axis_y']
+    mod.use_axis[2] = p['axis_z']
+    mod.use_clip = p['use_clip']
+    mod.use_mirror_merge = p['use_merge']
+    mod.merge_threshold = p['merge_threshold']
+
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+
+    bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+                processed_mesh.visual.material = trimesh.visual.material
+
+            return (processed_mesh,)
+
+class SubdivisionMesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
+                "levels": ("INT", {"default": 2, "min": 0, "max": 6}),
+                "quality": ("INT", {"default": 3, "min": 1, "max": 6}),
+                "uv_smooth": (['PRESERVE_BOUNDARIES', 'ALL', 'PRESERVE_CORNERS', 'NONE'], {"default": 'PRESERVE_BOUNDARIES'}),
+                "boundary_smooth": (['ALL', 'PRESERVE_CORNERS'], {"default": 'ALL'}),
+                "use_limit_surface": ("BOOLEAN", {"default": True}),
+                "use_custom_normals": ("BOOLEAN", {"default": False}),
+                "smooth_shading": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "subdivide"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def subdivide(self, trimesh, merge_distance, levels, quality, uv_smooth, boundary_smooth, use_limit_surface, use_custom_normals, smooth_shading):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "i.glb")
+            output_mesh_path = os.path.join(temp_dir, "o.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+            
+            trimesh.export(file_obj=input_mesh_path)
+
+            params = {
+                'merge_distance': merge_distance,
+                'levels': levels,
+                'quality': quality,
+                'uv_smooth': uv_smooth,
+                'boundary_smooth': boundary_smooth,
+                'use_limit_surface': use_limit_surface,
+                'use_custom_normals': use_custom_normals,
+                'smooth_shading': smooth_shading,
+            }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_mesh'] = repr(input_mesh_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
+
+            script = f"""
+import bpy, sys, os, traceback
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+    
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj: raise Exception("No mesh found in the imported GLB file.")
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    if p['merge_distance'] > 0.0:
+        bpy.ops.mesh.remove_doubles(threshold=p['merge_distance'])
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    mod = obj.modifiers.new(name="Subdivision", type='SUBSURF')
+    mod.subdivision_type = 'CATMULL_CLARK'
+    mod.levels = p['levels']
+    mod.render_levels = p['levels']
+    mod.quality = p['quality']
+    mod.uv_smooth = p['uv_smooth']
+    mod.boundary_smooth = p['boundary_smooth']
+    mod.use_limit_surface = p['use_limit_surface']
+    mod.use_custom_normals = p['use_custom_normals']
+
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    
+    if p['smooth_shading']:
+        bpy.ops.object.shade_smooth()
+    else:
+        bpy.ops.object.shade_flat()
 
     bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
     sys.exit(0)
