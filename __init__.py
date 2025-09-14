@@ -24,7 +24,7 @@ NODE_CLASS_MAPPINGS = {
     "SmoothMesh": SmoothMesh,
     "VertexToHighPoly": VertexToHighPoly,
     "VertexColorBake": VertexColorBake,
-    "ProcessMesh": ProcessMesh
+    "ProcessMesh": ProcessMesh,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
