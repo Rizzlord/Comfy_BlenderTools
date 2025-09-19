@@ -1012,3 +1012,86 @@ class QuadriflowSettings:
     FUNCTION = "get_settings"
     CATEGORY = "Comfy_BlenderTools/Utils/Settings"
     def get_settings(self, **kwargs): return (kwargs,)
+    
+class SmoothByAngle:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "angle": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 180.0, "step": 1.0}),
+                "merge_distance": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.1, "step": 0.0001}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "apply_smooth"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def apply_smooth(self, trimesh, angle, merge_distance):
+        import tempfile
+        import os
+        import trimesh as trimesh_loader
+        from .utils import _run_blender_script
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "input.glb")
+            output_mesh_path = os.path.join(temp_dir, "output.glb")
+            script_path = os.path.join(temp_dir, "script.py")
+
+            trimesh.export(input_mesh_path)
+
+            params = {
+                'angle': angle,
+                'merge_distance': merge_distance,
+                'input_mesh': input_mesh_path,
+                'output_mesh': output_mesh_path,
+            }
+
+            script = """
+import bpy
+import bmesh
+from math import radians
+
+p = """ + str(params) + """
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+
+obj = bpy.context.active_object
+if not obj or obj.type != 'MESH':
+    obj = next(o for o in bpy.context.scene.objects if o.type == 'MESH')
+
+bpy.context.view_layer.objects.active = obj
+obj.select_set(True)
+
+# Merge by Distance
+bpy.ops.object.mode_set(mode='EDIT')
+bm = bmesh.from_edit_mesh(obj.data)
+original_verts = len(bm.verts)
+bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=p['merge_distance'])
+bmesh.update_edit_mesh(obj.data)
+bm.free()
+
+# Reset Vectors (Clear custom normals and recalculate)
+bpy.ops.mesh.select_all(action='SELECT')
+if obj.data.has_custom_normals:
+    bpy.ops.mesh.customdata_custom_splitnormals_clear()
+bpy.ops.mesh.normals_make_consistent(inside=False)
+bpy.ops.object.mode_set(mode='OBJECT')
+
+# Smooth by Angle
+bpy.ops.object.shade_smooth_by_angle(angle=radians(p['angle']))
+
+bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB')
+
+"""
+
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+
+            return (processed_mesh,)
