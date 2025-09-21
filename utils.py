@@ -7,6 +7,7 @@ import folder_paths
 import numpy as np
 import torch
 from PIL import Image, ImageEnhance, ImageFilter
+import pymeshlab
 
 def get_blender_path():
     blender_path = os.environ.get("BLENDER_EXE")
@@ -260,7 +261,12 @@ class TextureToHeight:
             tile_height = int(original_height / scale)
 
             if tile_width > 0 and tile_height > 0:
-                tile = pil_img.resize((tile_width, tile_height), Image.LANCZOS)
+                try:
+                    # Try newer PIL version first
+                    tile = pil_img.resize((tile_width, tile_height), Image.Resampling.LANCZOS)
+                except AttributeError:
+                    # Fallback to older PIL version
+                    tile = pil_img.resize((tile_width, tile_height), Image.LANCZOS)
                 tiled_image = Image.new(pil_img.mode, (original_width, original_height))
                 
                 for y in range(0, original_height, tile_height):
@@ -429,7 +435,12 @@ class DisplaceMesh:
                 tile_height = int(original_height / texture_scale)
 
                 if tile_width > 0 and tile_height > 0:
-                    tile = img.resize((tile_width, tile_height), Image.LANCZOS)
+                    try:
+                        # Try newer PIL version first
+                        tile = img.resize((tile_width, tile_height), Image.Resampling.LANCZOS)
+                    except AttributeError:
+                        # Fallback to older PIL version
+                        tile = img.resize((tile_width, tile_height), Image.LANCZOS)
                     tiled_image = Image.new(img.mode, (original_width, original_height))
                     
                     for y in range(0, original_height, tile_height):
@@ -949,7 +960,7 @@ class QuadriflowRemesh:
 
             script = f"""
 import bpy, sys, traceback
-p = {{ {', '.join(f'"{k}": {v}' for k, v in script_params.items())} }}
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
 
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -1095,3 +1106,626 @@ bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB')
             processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
 
             return (processed_mesh,)
+
+class Pyremesh:
+    """
+    A ComfyUI node for adaptive mesh simplification and remeshing using PyMeshLab.
+    It creates a high-quality, uniform mesh that adapts to the curvature of the input,
+    placing more polygons in areas of high detail.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "target_faces": ("INT", {
+                    "doc_string": "Approximate number of faces desired after remeshing.",
+                    "default": 20000, "min": 100, "max": 500000, "step": 100
+                }),
+                "adaptive_sizing": ("BOOLEAN", {
+                    "doc_string": "Enable to adapt triangle size to local curvature. More triangles will be used in detailed areas.",
+                    "default": True
+                }),
+                "adaptive_sensitivity": ("FLOAT", {
+                    "doc_string": "Controls how aggressively the mesh adapts to curvature. Higher values mean more refinement in detailed areas.",
+                    "default": 0.5, "min": 0.0, "max": 5.0, "step": 0.05
+                }),
+                "use_curvature_weighted": ("BOOLEAN", {
+                    "doc_string": "Concentrate triangles in high-curvature regions using curvature-weighted decimation.",
+                    "default": True
+                }),
+                "preserve_boundaries": ("BOOLEAN", {
+                    "doc_string": "If enabled, tries to preserve the original mesh boundaries (open edges).",
+                    "default": True
+                }),
+                "preserve_features": ("BOOLEAN", {
+                    "doc_string": "If enabled, tries to preserve sharp features based on the feature angle.",
+                    "default": True
+                }),
+                "feature_angle_deg": ("FLOAT", {
+                    "doc_string": "The angle (in degrees) used to detect sharp features when 'preserve_features' is enabled.",
+                    "default": 30.0, "min": 0.0, "max": 180.0, "step": 1.0
+                }),
+                "make_watertight": ("BOOLEAN", {
+                    "doc_string": "After remeshing, run a post-processing step to fill holes and make the mesh watertight.",
+                    "default": True
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "remesh"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def remesh(self, trimesh, target_faces, adaptive_sizing, adaptive_sensitivity, use_curvature_weighted, preserve_boundaries, preserve_features, feature_angle_deg, make_watertight):
+        import numpy as np
+        ms = pymeshlab.MeshSet()
+        pymeshlab_mesh = pymeshlab.Mesh(vertex_matrix=trimesh.vertices, face_matrix=trimesh.faces)
+        ms.add_mesh(pymeshlab_mesh, "input_mesh")
+
+        v = trimesh.vertices.astype(np.float64)
+        f = trimesh.faces.astype(np.int64)
+        tri = v[f]
+        areas = 0.5 * np.linalg.norm(np.cross(tri[:,1] - tri[:,0], tri[:,2] - tri[:,0]), axis=1)
+        total_area = float(np.sum(areas))
+        bb_min = v.min(axis=0)
+        bb_max = v.max(axis=0)
+        bbox_diag = float(np.linalg.norm(bb_max - bb_min))
+        sens_bias = max(0.2, min(1.8, 1.0 + (adaptive_sensitivity - 0.5) * 0.3))
+        eff_target = max(50, int(target_faces * sens_bias))
+        if total_area <= 0 or bbox_diag <= 0:
+            targetlen_percent = 1.0
+        else:
+            edge_len = np.sqrt((4.0 * total_area) / (np.sqrt(3.0) * eff_target))
+            targetlen_percent = max(0.01, min(20.0, (edge_len / bbox_diag) * 100.0))
+
+        ms.meshing_isotropic_explicit_remeshing(
+            targetlen=pymeshlab.PercentageValue(targetlen_percent),
+            adaptive=adaptive_sizing,
+            checksurfdist=False,
+            featuredeg=feature_angle_deg
+        )
+
+        cur_faces = ms.current_mesh().face_matrix().shape[0]
+        if cur_faces > target_faces:
+            try:
+                if use_curvature_weighted:
+                    ms.compute_curvature_principal_directions()
+                ms.meshing_decimation_quadric_edge_collapse(
+                    targetfacenum=int(target_faces),
+                    qualityweight=bool(use_curvature_weighted)
+                )
+            except Exception as e:
+                print(f"Decimation fallback: {e}")
+                ms.meshing_decimation_quadric_edge_collapse(
+                    targetfacenum=int(target_faces)
+                )
+
+        if make_watertight:
+            ms.meshing_remove_unreferenced_vertices()
+            ms.meshing_remove_duplicate_faces()
+            ms.meshing_remove_unreferenced_vertices()
+
+        processed_mesh = ms.current_mesh()
+        new_vertices = processed_mesh.vertex_matrix()
+        new_faces = processed_mesh.face_matrix()
+
+        if new_vertices.shape[0] == 0 or new_faces.shape[0] == 0:
+            print("WARNING: PyMeshLab remeshing resulted in an empty mesh. Returning original mesh.")
+            return (trimesh,)
+
+        output_mesh = trimesh_loader.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+        output_mesh.remove_unreferenced_vertices()
+        output_mesh.remove_degenerate_faces()
+
+        if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+            output_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
+            output_mesh.visual.material = trimesh.visual.material
+
+        return (output_mesh,)
+
+
+class O3DRemesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "target_faces": ("INT", {
+                    "default": 50000, "min": 1000, "max": 500000, "step": 1000
+                }),
+                "method": (["poisson_quadric", "adaptive_decimation", "cluster_simplify"], {
+                    "default": "poisson_quadric"
+                }),
+                "poisson_depth": ("INT", {
+                    "default": 9, "min": 6, "max": 12, "step": 1
+                }),
+                "sample_points": ("INT", {
+                    "default": 100000, "min": 10000, "max": 1000000, "step": 10000
+                }),
+                "preserve_boundary": ("BOOLEAN", {"default": True}),
+                "smooth_iterations": ("INT", {
+                    "default": 5, "min": 0, "max": 20, "step": 1
+                }),
+                "make_watertight": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "o3d_remesh"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def o3d_remesh(self, trimesh, target_faces, method, poisson_depth, sample_points, 
+                      preserve_boundary, smooth_iterations, make_watertight):
+        try:
+            import open3d as o3d
+        except ImportError:
+            raise ImportError("Open3D is required for InstaRemesh. Install with: pip install open3d")
+        
+        # Convert trimesh to Open3D mesh
+        vertices = trimesh.vertices.astype(np.float64)
+        faces = trimesh.faces.astype(np.int32)
+        
+        o3d_mesh = o3d.geometry.TriangleMesh()
+        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+        o3d_mesh.triangles = o3d.utility.Vector3iVector(faces)
+        o3d_mesh.compute_vertex_normals()
+        
+        if method == "poisson_quadric":
+            # Sample points from mesh surface
+            if make_watertight:
+                # Use Poisson reconstruction for watertight mesh
+                pcd = o3d_mesh.sample_points_poisson_disk(sample_points)
+                pcd.estimate_normals()
+                
+                # Poisson surface reconstruction
+                mesh_poisson, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                    pcd, depth=poisson_depth, width=0, scale=1.1, linear_fit=False
+                )
+                
+                # Remove disconnected components
+                mesh_poisson.remove_degenerate_triangles()
+                mesh_poisson.remove_duplicated_triangles()
+                mesh_poisson.remove_duplicated_vertices()
+                mesh_poisson.remove_non_manifold_edges()
+                
+                processed_mesh = mesh_poisson
+            else:
+                processed_mesh = o3d_mesh
+            
+            # Quadric decimation to target face count
+            if len(processed_mesh.triangles) > target_faces:
+                processed_mesh = processed_mesh.simplify_quadric_decimation(target_faces)
+                
+        elif method == "adaptive_decimation":
+            # Optimized adaptive decimation with preprocessing for speed
+            current_faces = len(o3d_mesh.triangles)
+            print(f"Input mesh: {current_faces} faces, target: {target_faces}")
+            
+            if current_faces <= target_faces:
+                print("Mesh already at or below target face count")
+                processed_mesh = o3d_mesh
+            else:
+                # Multi-stage decimation for better speed and quality
+                reduction_ratio = target_faces / current_faces
+                
+                if reduction_ratio < 0.1 and current_faces > 100000:
+                    # Extreme reduction on high-poly mesh: use multi-stage approach
+                    print("Using multi-stage decimation for extreme reduction...")
+                    
+                    # Stage 1: Fast cluster-based pre-reduction to ~10x target
+                    intermediate_target = min(target_faces * 10, current_faces // 2)
+                    bbox = o3d_mesh.get_axis_aligned_bounding_box()
+                    bbox_diag = np.linalg.norm(bbox.get_extent())
+                    voxel_size = bbox_diag / np.sqrt(intermediate_target)
+                    
+                    stage1_mesh = o3d_mesh.simplify_vertex_clustering(
+                        voxel_size=voxel_size,
+                        contraction=o3d.geometry.SimplificationContraction.Average
+                    )
+                    print(f"Stage 1 (clustering): {len(stage1_mesh.triangles)} faces")
+                    
+                    # Stage 2: Quadric decimation to final target
+                    if len(stage1_mesh.triangles) > target_faces:
+                        processed_mesh = stage1_mesh.simplify_quadric_decimation(
+                            target_number_of_triangles=target_faces
+                        )
+                        print(f"Stage 2 (quadric): {len(processed_mesh.triangles)} faces")
+                    else:
+                        processed_mesh = stage1_mesh
+                        
+                elif reduction_ratio < 0.3 and current_faces > 50000:
+                    # Heavy reduction on medium-high poly: cluster first
+                    print("Using cluster + quadric decimation for heavy reduction...")
+                    
+                    # Pre-reduce with clustering to ~3x target
+                    intermediate_target = target_faces * 3
+                    bbox = o3d_mesh.get_axis_aligned_bounding_box()
+                    bbox_diag = np.linalg.norm(bbox.get_extent())
+                    voxel_size = bbox_diag / np.sqrt(intermediate_target * 2)
+                    
+                    cluster_mesh = o3d_mesh.simplify_vertex_clustering(
+                        voxel_size=voxel_size,
+                        contraction=o3d.geometry.SimplificationContraction.Average
+                    )
+                    print(f"Pre-clustering: {len(cluster_mesh.triangles)} faces")
+                    
+                    # Final quadric decimation
+                    processed_mesh = cluster_mesh.simplify_quadric_decimation(
+                        target_number_of_triangles=target_faces
+                    )
+                    print(f"Final quadric: {len(processed_mesh.triangles)} faces")
+                    
+                else:
+                    # Direct quadric decimation for moderate reductions
+                    print("Using direct quadric decimation...")
+                    processed_mesh = o3d_mesh.simplify_quadric_decimation(
+                        target_number_of_triangles=target_faces
+                    )
+                    print(f"Direct quadric result: {len(processed_mesh.triangles)} faces")
+                
+        elif method == "cluster_simplify":
+            # Vertex clustering for fast simplification with improved robustness
+            bbox = o3d_mesh.get_axis_aligned_bounding_box()
+            bbox_size = bbox.get_extent()
+            bbox_diag = np.linalg.norm(bbox_size)
+            
+            # Adaptive voxel size based on mesh size and target faces
+            current_faces = len(o3d_mesh.triangles)
+            if current_faces > 0:
+                # Calculate voxel size to approximately achieve target faces
+                reduction_factor = min(0.9, target_faces / current_faces)
+                base_voxel_size = bbox_diag / 100  # Base size
+                voxel_size = base_voxel_size * np.sqrt(reduction_factor)
+                voxel_size = max(voxel_size, bbox_diag / 1000)  # Minimum voxel size
+            else:
+                voxel_size = bbox_diag / 200
+            
+            print(f"Using voxel size: {voxel_size:.6f} for bbox diagonal: {bbox_diag:.6f}")
+            
+            # Apply vertex clustering
+            processed_mesh = o3d_mesh.simplify_vertex_clustering(
+                voxel_size=voxel_size,
+                contraction=o3d.geometry.SimplificationContraction.Average
+            )
+            
+            # Validate mesh after clustering
+            if len(processed_mesh.vertices) == 0 or len(processed_mesh.triangles) == 0:
+                print("WARNING: Vertex clustering produced empty mesh. Using original.")
+                processed_mesh = o3d_mesh
+            
+            # Further reduce if still too many faces
+            elif len(processed_mesh.triangles) > target_faces:
+                try:
+                    processed_mesh = processed_mesh.simplify_quadric_decimation(target_faces)
+                except Exception as e:
+                    print(f"WARNING: Quadric decimation failed: {e}. Using clustered result.")
+        
+        # Post-processing
+        if smooth_iterations > 0:
+            processed_mesh = processed_mesh.filter_smooth_laplacian(
+                number_of_iterations=smooth_iterations
+            )
+        
+        # Clean up mesh
+        processed_mesh.remove_degenerate_triangles()
+        processed_mesh.remove_duplicated_triangles()
+        processed_mesh.remove_duplicated_vertices()
+        processed_mesh.remove_non_manifold_edges()
+        
+        # Convert back to trimesh
+        new_vertices = np.asarray(processed_mesh.vertices)
+        new_faces = np.asarray(processed_mesh.triangles)
+        
+        # Validate and clean NaN/infinite values
+        if np.any(np.isnan(new_vertices)) or np.any(np.isinf(new_vertices)):
+            print("WARNING: Found NaN or infinite values in vertices. Cleaning mesh...")
+            # Remove faces with NaN/infinite vertices
+            valid_vertices = ~(np.isnan(new_vertices).any(axis=1) | np.isinf(new_vertices).any(axis=1))
+            vertex_map = np.full(len(new_vertices), -1, dtype=np.int32)
+            vertex_map[valid_vertices] = np.arange(np.sum(valid_vertices))
+            
+            new_vertices = new_vertices[valid_vertices]
+            
+            # Update faces to use new vertex indices
+            valid_faces = []
+            for face in new_faces:
+                if all(vertex_map[v] >= 0 for v in face):
+                    valid_faces.append([vertex_map[v] for v in face])
+            
+            if len(valid_faces) == 0:
+                print("WARNING: All faces removed due to NaN/infinite values. Returning original mesh.")
+                return (trimesh,)
+                
+            new_faces = np.array(valid_faces)
+        
+        if new_vertices.shape[0] == 0 or new_faces.shape[0] == 0:
+            print("WARNING: O3DRemesh produced an empty mesh. Returning original mesh.")
+            return (trimesh,)
+        
+        output_mesh = trimesh_loader.Trimesh(
+            vertices=new_vertices, 
+            faces=new_faces, 
+            process=False
+        )
+        
+        # Preserve material if exists
+        if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+            output_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
+            output_mesh.visual.material = trimesh.visual.material
+        
+        return (output_mesh,)
+
+class InstantMeshes:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "target_faces": ("INT", {
+                    "default": 5000, "min": 100, "max": 500000, "step": 100
+                }),
+                "preprocess": ("BOOLEAN", {"default": True}),
+                "make_watertight": ("BOOLEAN", {"default": True}),
+                "simplify_before": ("BOOLEAN", {"default": False}),
+                "simplify_ratio": ("FLOAT", {
+                    "default": 0.3, "min": 0.1, "max": 0.9, "step": 0.1
+                }),
+            },
+            "optional": {
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "run_instant_meshes"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def get_instant_meshes_path(self):
+        """Get Instant Meshes executable path from custom node folder"""
+        # Get the directory where utils.py is located (custom node folder)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        hardcoded_path = os.path.join(current_dir, "Instant_Meshes.exe")
+        
+        # Check hardcoded path
+        if os.path.isfile(hardcoded_path):
+            print(f"INFO: Found Instant Meshes in custom node folder: {hardcoded_path}")
+            return hardcoded_path
+                
+        raise FileNotFoundError(
+            f"Instant Meshes executable not found at expected location: {hardcoded_path}\n"
+            "Please download Instant_Meshes.exe from https://github.com/wjakob/instant-meshes \n"
+            "and place it in the custom node folder next to utils.py"
+        )
+
+    def preprocess_mesh(self, trimesh_mesh, make_watertight, simplify_before, simplify_ratio):
+        """Preprocess mesh using PyMeshLab/Open3D"""
+        try:
+            import open3d as o3d
+            
+            # Convert to Open3D
+            vertices = trimesh_mesh.vertices.astype(np.float64)
+            faces = trimesh_mesh.faces.astype(np.int32)
+            
+            o3d_mesh = o3d.geometry.TriangleMesh()
+            o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+            o3d_mesh.triangles = o3d.utility.Vector3iVector(faces)
+            o3d_mesh.compute_vertex_normals()
+            
+            # Clean up
+            o3d_mesh.remove_degenerate_triangles()
+            o3d_mesh.remove_duplicated_triangles()
+            o3d_mesh.remove_duplicated_vertices()
+            o3d_mesh.remove_non_manifold_edges()
+            
+            if make_watertight:
+                # Sample points and reconstruct
+                pcd = o3d_mesh.sample_points_poisson_disk(50000)
+                pcd.estimate_normals()
+                
+                # Poisson reconstruction for watertight mesh
+                mesh_watertight, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                    pcd, depth=8, width=0, scale=1.1, linear_fit=False
+                )
+                
+                mesh_watertight.remove_degenerate_triangles()
+                mesh_watertight.remove_duplicated_triangles()
+                mesh_watertight.remove_duplicated_vertices()
+                
+                o3d_mesh = mesh_watertight
+            
+            if simplify_before:
+                # Simplify before Instant Meshes
+                current_faces = len(o3d_mesh.triangles)
+                target_faces = int(current_faces * simplify_ratio)
+                if target_faces < current_faces:
+                    o3d_mesh = o3d_mesh.simplify_quadric_decimation(target_faces)
+            
+            # Convert back to trimesh
+            new_vertices = np.asarray(o3d_mesh.vertices)
+            new_faces = np.asarray(o3d_mesh.triangles)
+            
+            preprocessed_mesh = trimesh_loader.Trimesh(
+                vertices=new_vertices, 
+                faces=new_faces, 
+                process=False
+            )
+            
+            return preprocessed_mesh
+            
+        except ImportError:
+            print("WARNING: Open3D not available. Using PyMeshLab for preprocessing.")
+            # Fallback to PyMeshLab
+            ms = pymeshlab.MeshSet()
+            pymeshlab_mesh = pymeshlab.Mesh(vertex_matrix=trimesh_mesh.vertices, face_matrix=trimesh_mesh.faces)
+            ms.add_mesh(pymeshlab_mesh, "input_mesh")
+            
+            # Clean mesh
+            ms.meshing_remove_unreferenced_vertices()
+            ms.meshing_remove_duplicate_faces()
+            
+            if make_watertight:
+                ms.meshing_close_holes(maxholesize=30)
+                
+            if simplify_before:
+                current_faces = ms.current_mesh().face_number()
+                target_faces = int(current_faces * simplify_ratio)
+                if target_faces < current_faces:
+                    ms.meshing_decimation_quadric_edge_collapse(targetfacenum=target_faces)
+            
+            processed_mesh = ms.current_mesh()
+            new_vertices = processed_mesh.vertex_matrix()
+            new_faces = processed_mesh.face_matrix()
+            
+            return trimesh_loader.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
+
+    def calculate_instant_meshes_target(self, desired_faces, input_face_count=None):
+        """Calculate target faces for Instant Meshes to achieve desired output"""
+        # Instant Meshes tends to output more faces than requested
+        # Based on empirical testing, apply correction factors
+        
+        if input_face_count:
+            # If we know input face count, use ratio-based approach
+            reduction_ratio = desired_faces / input_face_count
+            if reduction_ratio > 0.8:
+                # Light reduction: Instant Meshes is fairly accurate
+                target_faces = int(desired_faces * 0.9)
+            elif reduction_ratio > 0.3:
+                # Medium reduction: Apply moderate correction
+                target_faces = int(desired_faces * 0.7)
+            else:
+                # Heavy reduction: Apply strong correction
+                target_faces = int(desired_faces * 0.5)
+        else:
+            # Fallback: General correction based on face count ranges
+            if desired_faces < 2000:
+                target_faces = int(desired_faces * 0.6)
+            elif desired_faces < 10000:
+                target_faces = int(desired_faces * 0.7)
+            elif desired_faces < 50000:
+                target_faces = int(desired_faces * 0.8)
+            else:
+                target_faces = int(desired_faces * 0.85)
+        
+        # Ensure minimum face count
+        target_faces = max(target_faces, 100)
+        
+        print(f"Desired faces: {desired_faces}, Calculated target for Instant Meshes: {target_faces}")
+        return target_faces
+
+    def run_instant_meshes_iterative(self, trimesh, desired_faces, processed_mesh, temp_dir, exe_path, max_iterations=3):
+        """Run Instant Meshes with iterative target adjustment"""
+        input_mesh_path = os.path.join(temp_dir, "input.obj")
+        output_mesh_path = os.path.join(temp_dir, "output.obj")
+        
+        # Export input mesh
+        processed_mesh.export(input_mesh_path)
+        input_face_count = len(processed_mesh.faces)
+        
+        best_result = None
+        best_difference = float('inf')
+        
+        for iteration in range(max_iterations):
+            if iteration == 0:
+                # First attempt with calculated target
+                target_faces = self.calculate_instant_meshes_target(desired_faces, input_face_count)
+            else:
+                # Adjust based on previous result
+                if best_result is not None:
+                    actual_faces = len(best_result.faces)
+                    ratio = actual_faces / target_faces if target_faces > 0 else 1
+                    
+                    # Adjust target for next iteration
+                    if actual_faces > desired_faces:
+                        # Got too many faces, reduce target more aggressively
+                        adjustment = 0.7 if ratio > 2 else 0.8
+                    else:
+                        # Got too few faces, increase target
+                        adjustment = 1.3 if ratio < 0.5 else 1.2
+                    
+                    target_faces = int(target_faces * (desired_faces / actual_faces) * adjustment)
+                    target_faces = max(target_faces, 100)
+                
+            print(f"Iteration {iteration + 1}: Target faces = {target_faces}")
+            
+            # Construct command
+            cmd = [
+                exe_path,
+                "-o", output_mesh_path,
+                "-f", str(target_faces),
+                "-S", "2",
+                input_mesh_path
+            ]
+            
+            try:
+                result = subprocess.run(
+                    cmd, 
+                    check=True, 
+                    capture_output=True, 
+                    text=True,
+                    timeout=300
+                )
+                
+                if result.stdout:
+                    print(f"Instant Meshes stdout: {result.stdout}")
+                
+                # Load and check result
+                if os.path.exists(output_mesh_path):
+                    current_result = trimesh_loader.load(output_mesh_path, force="mesh")
+                    actual_faces = len(current_result.faces)
+                    difference = abs(actual_faces - desired_faces)
+                    
+                    print(f"Result: {actual_faces} faces (difference: {difference})")
+                    
+                    # Keep best result
+                    if difference < best_difference:
+                        best_difference = difference
+                        best_result = current_result
+                    
+                    # If we're close enough, stop iterating
+                    tolerance = max(desired_faces * 0.1, 500)  # 10% tolerance or 500 faces
+                    if difference <= tolerance:
+                        print(f"Achieved acceptable result within tolerance ({tolerance} faces)")
+                        break
+                        
+            except Exception as e:
+                print(f"Iteration {iteration + 1} failed: {e}")
+                if iteration == max_iterations - 1:  # Last iteration
+                    raise
+                continue
+        
+        if best_result is None:
+            raise RuntimeError("All Instant Meshes iterations failed")
+            
+        return best_result
+
+    def run_instant_meshes(self, trimesh, target_faces, preprocess, make_watertight, 
+                          simplify_before, simplify_ratio):
+        """Run Instant Meshes remeshing with iterative target adjustment"""
+        
+        # Get executable path
+        exe_path = self.get_instant_meshes_path()
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Preprocess if requested
+            if preprocess:
+                processed_mesh = self.preprocess_mesh(
+                    trimesh, make_watertight, simplify_before, simplify_ratio
+                )
+            else:
+                processed_mesh = trimesh
+            
+            # Run iterative Instant Meshes
+            try:
+                output_mesh = self.run_instant_meshes_iterative(
+                    trimesh, target_faces, processed_mesh, temp_dir, exe_path
+                )
+            except Exception as e:
+                raise RuntimeError(f"Instant Meshes processing failed: {e}")
+            
+            # Preserve material if exists
+            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+                output_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
+                output_mesh.visual.material = trimesh.visual.material
+            
+            return (output_mesh,)

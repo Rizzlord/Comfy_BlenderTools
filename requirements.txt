@@ -2,3 +2,5 @@ trimesh
 xatlas
 numpy
 Pillow
+pymeshlab
+open3d
