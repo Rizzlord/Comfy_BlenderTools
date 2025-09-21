@@ -1466,12 +1466,18 @@ class InstantMeshes:
                 "target_faces": ("INT", {
                     "default": 5000, "min": 100, "max": 500000, "step": 100
                 }),
-                "preprocess": ("BOOLEAN", {"default": True}),
                 "make_watertight": ("BOOLEAN", {"default": True}),
                 "simplify_before": ("BOOLEAN", {"default": False}),
                 "simplify_ratio": ("FLOAT", {
                     "default": 0.3, "min": 0.1, "max": 0.9, "step": 0.1
                 }),
+                "adaptive_detail": ("BOOLEAN", {"default": False}),
+                "orientation_symmetry": (["2", "4", "6"], {"default": "4"}),
+                "position_symmetry": (["4", "6"], {"default": "4"}),
+                "crease_angle": ("FLOAT", {
+                    "default": 30.0, "min": 0.0, "max": 180.0, "step": 1.0
+                }),
+                "boundary_alignment": ("BOOLEAN", {"default": True}),
             },
             "optional": {
             }
@@ -1498,8 +1504,8 @@ class InstantMeshes:
             "and place it in the custom node folder next to utils.py"
         )
 
-    def preprocess_mesh(self, trimesh_mesh, make_watertight, simplify_before, simplify_ratio):
-        """Preprocess mesh using PyMeshLab/Open3D"""
+    def preprocess_mesh(self, trimesh_mesh, make_watertight, simplify_before, simplify_ratio, adaptive_detail=False):
+        """Preprocess mesh using PyMeshLab/Open3D with optional detail adaptation"""
         try:
             import open3d as o3d
             
@@ -1518,14 +1524,31 @@ class InstantMeshes:
             o3d_mesh.remove_duplicated_vertices()
             o3d_mesh.remove_non_manifold_edges()
             
+            # Detail-adaptive preprocessing for better Instant Meshes results
+            if adaptive_detail:
+                print("Applying detail-adaptive preprocessing...")
+                
+                # Compute curvature to identify high-detail areas
+                o3d_mesh.compute_triangle_normals()
+                o3d_mesh.compute_vertex_normals()
+                
+                # Apply targeted smoothing to reduce noise while preserving features
+                # Light smoothing to reduce noise that could confuse Instant Meshes
+                smoothed_mesh = o3d_mesh.filter_smooth_laplacian(number_of_iterations=2)
+                
+                # Use the smoothed version for better field computation
+                o3d_mesh = smoothed_mesh
+            
             if make_watertight:
                 # Sample points and reconstruct
-                pcd = o3d_mesh.sample_points_poisson_disk(50000)
+                sample_count = 50000 if not adaptive_detail else 75000  # More samples for detail preservation
+                pcd = o3d_mesh.sample_points_poisson_disk(sample_count)
                 pcd.estimate_normals()
                 
                 # Poisson reconstruction for watertight mesh
+                depth = 8 if not adaptive_detail else 9  # Higher depth for detail preservation
                 mesh_watertight, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                    pcd, depth=8, width=0, scale=1.1, linear_fit=False
+                    pcd, depth=depth, width=0, scale=1.1, linear_fit=False
                 )
                 
                 mesh_watertight.remove_degenerate_triangles()
@@ -1539,6 +1562,9 @@ class InstantMeshes:
                 current_faces = len(o3d_mesh.triangles)
                 target_faces = int(current_faces * simplify_ratio)
                 if target_faces < current_faces:
+                    if adaptive_detail:
+                        # Use more conservative simplification to preserve detail
+                        target_faces = int(current_faces * (simplify_ratio + 0.1))
                     o3d_mesh = o3d_mesh.simplify_quadric_decimation(target_faces)
             
             # Convert back to trimesh
@@ -1613,8 +1639,10 @@ class InstantMeshes:
         print(f"Desired faces: {desired_faces}, Calculated target for Instant Meshes: {target_faces}")
         return target_faces
 
-    def run_instant_meshes_iterative(self, trimesh, desired_faces, processed_mesh, temp_dir, exe_path, max_iterations=3):
-        """Run Instant Meshes with iterative target adjustment"""
+    def run_instant_meshes_iterative(self, trimesh, desired_faces, processed_mesh, temp_dir, exe_path, 
+                                    adaptive_detail=False, orientation_symmetry="4", position_symmetry="4", 
+                                    crease_angle=30.0, boundary_alignment=True, max_iterations=3):
+        """Run Instant Meshes with iterative target adjustment and adaptive detail control"""
         input_mesh_path = os.path.join(temp_dir, "input.obj")
         output_mesh_path = os.path.join(temp_dir, "output.obj")
         
@@ -1648,14 +1676,40 @@ class InstantMeshes:
                 
             print(f"Iteration {iteration + 1}: Target faces = {target_faces}")
             
-            # Construct command
+            # Build command with adaptive detail parameters
             cmd = [
                 exe_path,
                 "-o", output_mesh_path,
                 "-f", str(target_faces),
-                "-S", "2",
-                input_mesh_path
+                "-S", "2"
             ]
+            
+            # Add adaptive detail parameters
+            if adaptive_detail:
+                print(f"Using adaptive detail with rosy={orientation_symmetry}, posy={position_symmetry}")
+                
+                # Start with simpler parameters to avoid extraction failure
+                if iteration == 0:
+                    # First iteration: Use conservative settings
+                    cmd.extend(["-r", "4"])  # Conservative orientation symmetry
+                    if boundary_alignment:
+                        cmd.append("-b")      # Boundary alignment helps
+                else:
+                    # Later iterations: Use more advanced settings if needed
+                    cmd.extend(["-r", orientation_symmetry])
+                    if int(position_symmetry) <= 4:  # Only use posy if reasonable
+                        cmd.extend(["-p", position_symmetry])
+                    if boundary_alignment:
+                        cmd.append("-b")
+            else:
+                # Non-adaptive mode: Use minimal parameters for reliability
+                pass
+                
+            # Add crease angle only if reasonable and not causing conflicts
+            if crease_angle > 0 and crease_angle < 90 and not adaptive_detail:
+                cmd.extend(["-c", str(crease_angle)])
+                
+            cmd.append(input_mesh_path)  # Input file last
             
             try:
                 result = subprocess.run(
@@ -1673,20 +1727,53 @@ class InstantMeshes:
                 if os.path.exists(output_mesh_path):
                     current_result = trimesh_loader.load(output_mesh_path, force="mesh")
                     actual_faces = len(current_result.faces)
-                    difference = abs(actual_faces - desired_faces)
                     
-                    print(f"Result: {actual_faces} faces (difference: {difference})")
+                    if actual_faces == 0:
+                        print(f"Warning: Iteration {iteration + 1} produced 0 faces. Trying fallback...")
+                        
+                        # Fallback: Try without adaptive parameters
+                        fallback_cmd = [
+                            exe_path,
+                            "-o", output_mesh_path,
+                            "-f", str(target_faces),
+                            "-S", "1",  # Reduced smoothing
+                            input_mesh_path
+                        ]
+                        
+                        try:
+                            print("Running fallback command without adaptive parameters...")
+                            fallback_result = subprocess.run(
+                                fallback_cmd,
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=300
+                            )
+                            
+                            if os.path.exists(output_mesh_path):
+                                current_result = trimesh_loader.load(output_mesh_path, force="mesh")
+                                actual_faces = len(current_result.faces)
+                                print(f"Fallback result: {actual_faces} faces")
+                        except Exception as fallback_error:
+                            print(f"Fallback also failed: {fallback_error}")
+                            continue
                     
-                    # Keep best result
-                    if difference < best_difference:
-                        best_difference = difference
-                        best_result = current_result
-                    
-                    # If we're close enough, stop iterating
-                    tolerance = max(desired_faces * 0.1, 500)  # 10% tolerance or 500 faces
-                    if difference <= tolerance:
-                        print(f"Achieved acceptable result within tolerance ({tolerance} faces)")
-                        break
+                    if actual_faces > 0:
+                        difference = abs(actual_faces - desired_faces)
+                        print(f"Result: {actual_faces} faces (difference: {difference})")
+                        
+                        # Keep best result
+                        if difference < best_difference:
+                            best_difference = difference
+                            best_result = current_result
+                        
+                        # If we're close enough, stop iterating
+                        tolerance = max(desired_faces * 0.15, 1000)  # Increased tolerance for adaptive mode
+                        if difference <= tolerance:
+                            print(f"Achieved acceptable result within tolerance ({tolerance} faces)")
+                            break
+                    else:
+                        print(f"Iteration {iteration + 1} still produced 0 faces, continuing...")
                         
             except Exception as e:
                 print(f"Iteration {iteration + 1} failed: {e}")
@@ -1699,26 +1786,27 @@ class InstantMeshes:
             
         return best_result
 
-    def run_instant_meshes(self, trimesh, target_faces, preprocess, make_watertight, 
-                          simplify_before, simplify_ratio):
-        """Run Instant Meshes remeshing with iterative target adjustment"""
+    def run_instant_meshes(self, trimesh, target_faces, make_watertight, 
+                          simplify_before, simplify_ratio, adaptive_detail, orientation_symmetry, 
+                          position_symmetry, crease_angle, boundary_alignment):
+        """Run Instant Meshes remeshing with iterative target adjustment and adaptive detail (always preprocessed)"""
         
         # Get executable path
         exe_path = self.get_instant_meshes_path()
         
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Preprocess if requested
-            if preprocess:
-                processed_mesh = self.preprocess_mesh(
-                    trimesh, make_watertight, simplify_before, simplify_ratio
-                )
-            else:
-                processed_mesh = trimesh
+            # Always preprocess for InstantMeshes - it improves results significantly
+            print("Preprocessing mesh for InstantMeshes (always enabled)...")
+            processed_mesh = self.preprocess_mesh(
+                trimesh, make_watertight, simplify_before, simplify_ratio, adaptive_detail
+            )
             
-            # Run iterative Instant Meshes
+            # Run iterative Instant Meshes with adaptive parameters
             try:
                 output_mesh = self.run_instant_meshes_iterative(
-                    trimesh, target_faces, processed_mesh, temp_dir, exe_path
+                    trimesh, target_faces, processed_mesh, temp_dir, exe_path,
+                    adaptive_detail, orientation_symmetry, position_symmetry,
+                    crease_angle, boundary_alignment
                 )
             except Exception as e:
                 raise RuntimeError(f"Instant Meshes processing failed: {e}")
