@@ -62,6 +62,52 @@ def get_camera_position(center, distance, azimuth_deg, elevation_deg):
     
     return np.array([x, y, z])
 
+def resolve_camera_setup(num_views, camera_config=None):
+    """
+    Resolve a camera setup that matches the multiview image count.
+    When no camera_config is supplied we provide sensible defaults so the node works out-of-the-box.
+    """
+    if num_views <= 0:
+        raise ValueError("At least one multiview image is required.")
+
+    if camera_config:
+        camera_azims = camera_config.get("selected_camera_azims")
+        camera_elevs = camera_config.get("selected_camera_elevs")
+        if camera_azims is None or camera_elevs is None:
+            raise ValueError("camera_config must include 'selected_camera_azims' and 'selected_camera_elevs'.")
+        if len(camera_azims) != num_views or len(camera_elevs) != num_views:
+            raise ValueError(
+                f"Camera configuration expects {len(camera_azims)}/{len(camera_elevs)} views but "
+                f"{num_views} images were provided."
+            )
+        cam_distance = camera_config.get("camera_distance", 1.45)
+        ortho_scale_mult = camera_config.get("ortho_scale", 1.2)
+        return camera_azims, camera_elevs, cam_distance, ortho_scale_mult
+
+    default_layouts = {
+        4: (
+            [0.0, 90.0, 180.0, 270.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ),
+        6: (
+            [0.0, 90.0, 180.0, 270.0, 0.0, 180.0],
+            [10.0, -10.0, 10.0, -10.0, 90.0, -90.0],
+        ),
+        8: (
+            [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0],
+            [15.0, 15.0, 0.0, 0.0, 0.0, 0.0, -15.0, -15.0],
+        ),
+    }
+
+    if num_views in default_layouts:
+        camera_azims, camera_elevs = default_layouts[num_views]
+    else:
+        step = 360.0 / num_views
+        camera_azims = [step * i for i in range(num_views)]
+        camera_elevs = [0.0] * num_views
+
+    return camera_azims, camera_elevs, 1.45, 1.2
+
 class VertexToHighPoly:
     PROJECTION_MODES = ["orthographic", "perspective"]
 
@@ -98,19 +144,7 @@ class VertexToHighPoly:
         if not images_pil:
             raise ValueError("No images provided for projection.")
 
-        if camera_config:
-            camera_azims = camera_config.get("selected_camera_azims", [0, 90, 180, 270, 0, 180])
-            camera_elevs = camera_config.get("selected_camera_elevs", [10, -10, 10, -10, 90, -90])
-            cam_distance = camera_config.get("camera_distance", 1.45)
-            ortho_scale_mult = camera_config.get("ortho_scale", 1.2)
-        else:
-            camera_azims = [0, 90, 180, 270, 0, 180]
-            camera_elevs = [10, -10, 10, -10, 90, -90]
-            cam_distance = 1.45
-            ortho_scale_mult = 1.2
-
-        if len(images_pil) != len(camera_azims):
-            raise ValueError(f"Number of images ({len(images_pil)}) does not match number of camera views ({len(camera_azims)}).")
+        camera_azims, camera_elevs, cam_distance, ortho_scale_mult = resolve_camera_setup(len(images_pil), camera_config)
 
         h, w, _ = np.array(images_pil[0]).shape
         aspect_ratio = w / h
@@ -197,7 +231,171 @@ class VertexToHighPoly:
         
         mesh.visual = trimesh.visual.ColorVisuals(vertex_colors=final_colors)
         return (mesh,)
-    
+
+
+class MultiviewDisplaceMesh:
+    PROJECTION_MODES = ["orthographic", "perspective"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mesh": ("TRIMESH",),
+                "multiview_images": ("IMAGE",),
+                "projection_mode": (cls.PROJECTION_MODES, {"default": "orthographic"}),
+                "strength": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "auto_displacement_map": ("BOOLEAN", {"default": True}),
+                "auto_displacement_contrast": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 8.0, "step": 0.01}),
+                "blend_sharpness": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "angle_cutoff": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 180.0, "step": 0.5}),
+                "perspective_fov": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 120.0, "step": 0.1}),
+                "orthographic_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "orthographic_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "perspective_width": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+                "perspective_height": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.01}),
+            },
+            "optional": {
+                "camera_config": ("HY3DCAMERA",),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    RETURN_NAMES = ("displaced_mesh",)
+    FUNCTION = "displace"
+    CATEGORY = "Comfy_BlenderTools/VertexBake"
+
+    def displace(
+        self,
+        mesh,
+        multiview_images,
+        projection_mode,
+        strength,
+        auto_displacement_map,
+        auto_displacement_contrast,
+        blend_sharpness,
+        angle_cutoff,
+        perspective_fov,
+        orthographic_width,
+        orthographic_height,
+        perspective_width,
+        perspective_height,
+        camera_config=None,
+    ):
+        mesh = mesh.copy()
+        images_pil = [Image.fromarray((img.cpu().numpy() * 255).astype(np.uint8)) for img in multiview_images]
+
+        if not images_pil:
+            raise ValueError("No images provided for projection.")
+
+        camera_azims, camera_elevs, cam_distance, ortho_scale_mult = resolve_camera_setup(len(images_pil), camera_config)
+
+        h, w, _ = np.array(images_pil[0]).shape
+        aspect_ratio = w / h
+        centroid = mesh.bounding_box.centroid
+        cam_target = centroid
+        cam_up = np.array([0, 1, 0])
+
+        displacement_accumulator = np.zeros((len(mesh.vertices), 1), dtype=np.float64)
+        weight_accumulator = np.zeros((len(mesh.vertices), 1), dtype=np.float64)
+
+        normals = mesh.vertex_normals.copy()
+
+        luminance_weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        processed_images = []
+
+        if auto_displacement_map:
+            for img_pil in images_pil:
+                gray = np.array(img_pil.convert('L'), dtype=np.float32) / 255.0
+                min_val = float(np.min(gray))
+                max_val = float(np.max(gray))
+                if max_val > min_val:
+                    gray = (gray - min_val) / (max_val - min_val)
+                else:
+                    gray.fill(0.5)
+                processed_images.append(gray)
+        else:
+            processed_images = [np.array(img.convert('RGBA')) for img in images_pil]
+
+        for i, (azim, elev) in enumerate(zip(camera_azims, camera_elevs)):
+            img_data = processed_images[i]
+            cam_pos = get_camera_position(centroid, cam_distance, azim, elev)
+            view_mat = create_view_matrix(cam_pos, cam_target, cam_up)
+
+            if projection_mode == 'orthographic':
+                if orthographic_width > 0 and orthographic_height > 0:
+                    proj_mat = create_orthographic_projection(orthographic_height, orthographic_width / orthographic_height)
+                else:
+                    extents = mesh.bounding_box.extents
+                    max_extent = float(np.max(extents))
+                    ortho_height = max_extent * ortho_scale_mult
+                    proj_mat = create_orthographic_projection(ortho_height, aspect_ratio)
+            else:
+                if perspective_width > 0 and perspective_height > 0:
+                    fov_y_rad = 2 * np.arctan((perspective_height / 2) / cam_distance)
+                    proj_mat = create_perspective_projection(fov_y_rad, perspective_width / perspective_height)
+                else:
+                    fov_y_rad = np.radians(perspective_fov)
+                    proj_mat = create_perspective_projection(fov_y_rad, aspect_ratio)
+
+            pvm_matrix = proj_mat @ view_mat
+            vertices = mesh.vertices
+            verts_homogeneous = np.hstack((vertices, np.ones((vertices.shape[0], 1))))
+            clip_coords = verts_homogeneous @ pvm_matrix.T
+
+            w_coords = clip_coords[:, 3]
+            w_coords[np.abs(w_coords) < 1e-6] = 1e-6
+            ndc = clip_coords[:, :3] / w_coords[:, None]
+
+            px = (ndc[:, 0] * 0.5 + 0.5) * w
+            py = (1 - (ndc[:, 1] * 0.5 + 0.5)) * h
+
+            frustum_indices = np.where(
+                (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1)
+            )[0]
+
+            view_vectors = vertices - cam_pos
+            view_vectors /= np.linalg.norm(view_vectors, axis=1)[:, np.newaxis]
+            dot_products = np.sum(normals * view_vectors, axis=1)
+            front_facing_vertex_indices = np.where(dot_products < 0)[0]
+
+            valid_indices = np.intersect1d(frustum_indices, front_facing_vertex_indices, assume_unique=True)
+
+            cos = -dot_products[valid_indices]
+            cos_thres = np.cos(np.deg2rad(angle_cutoff))
+            cos[cos < cos_thres] = 0.0
+            dynamic_weights = np.power(cos, blend_sharpness)
+            keep = dynamic_weights > 0
+            valid_indices = valid_indices[keep]
+            dynamic_weights = dynamic_weights[keep]
+
+            if valid_indices.size == 0:
+                continue
+
+            valid_px = np.clip(px[valid_indices], 0, w - 1).astype(int)
+            valid_py = np.clip(py[valid_indices], 0, h - 1).astype(int)
+
+            if auto_displacement_map:
+                displacement_values = img_data[valid_py, valid_px].astype(np.float32)
+            else:
+                sampled_colors = img_data[valid_py, valid_px, :3].astype(np.float32) / 255.0
+                displacement_values = sampled_colors @ luminance_weights
+            if auto_displacement_map:
+                centered_brightness = (displacement_values - 0.5) * auto_displacement_contrast
+            else:
+                centered_brightness = displacement_values - 0.5
+
+            displacement_accumulator[valid_indices] += centered_brightness[:, np.newaxis] * dynamic_weights[:, np.newaxis]
+            weight_accumulator[valid_indices] += dynamic_weights[:, np.newaxis]
+
+        valid_mask = weight_accumulator[:, 0] > 0
+        final_displacement = np.zeros((len(mesh.vertices), 1), dtype=np.float64)
+        final_displacement[valid_mask, 0] = displacement_accumulator[valid_mask, 0] / weight_accumulator[valid_mask, 0]
+
+        final_displacement *= (strength * 2.0)
+
+        mesh.vertices = mesh.vertices + normals * final_displacement
+        return (mesh,)
+
 class VertexColorBake:
     RESOLUTIONS = ["512", "1024", "2048", "4096", "8192"]
     BAKE_TYPES = ["diffuse"]

@@ -6,6 +6,7 @@ import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
 import torch
+import uuid
 from PIL import Image, ImageEnhance, ImageFilter
 import pymeshlab
 
@@ -1817,3 +1818,695 @@ class InstantMeshes:
                 output_mesh.visual.material = trimesh.visual.material
             
             return (output_mesh,)
+
+class UnwrapColoredMesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "colored_mesh": ("TRIMESH",),  # Colored mesh from weight painting workflow
+                "uv_margin": ("FLOAT", {
+                    "default": 0.02, "min": 0.001, "max": 0.1, "step": 0.001
+                }),
+                "seam_sensitivity": ("FLOAT", {
+                    "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.1
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "unwrap_colored_mesh"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def unwrap_colored_mesh(self, colored_mesh, uv_margin, seam_sensitivity):
+        """Unwrap colored mesh using color boundaries as seam guides with uvgami approach"""
+        
+        if not hasattr(colored_mesh, 'vertices') or not hasattr(colored_mesh, 'faces'):
+            raise ValueError("Input must be a valid trimesh")
+        
+        print(f"Unwrapping colored mesh using color boundaries as seam guides...")
+        
+        try:
+            import xatlas
+        except ImportError:
+            raise ImportError("xatlas is required for unwrapping. Install with: pip install xatlas")
+        
+        # Get color information from mesh
+        colors = None
+        if hasattr(colored_mesh, 'visual') and hasattr(colored_mesh.visual, 'vertex_colors'):
+            colors = colored_mesh.visual.vertex_colors
+        elif hasattr(colored_mesh, 'visual') and hasattr(colored_mesh.visual, 'face_colors'):
+            colors = colored_mesh.visual.face_colors
+        else:
+            print("Warning: No color information found, using standard unwrap")
+            return self.standard_unwrap(colored_mesh, uv_margin)
+        
+        # Convert to numpy arrays
+        vertices = np.array(colored_mesh.vertices, dtype=np.float32)
+        faces = np.array(colored_mesh.faces, dtype=np.uint32)
+        
+        # Detect color boundaries for seam restrictions
+        seam_weights = self.detect_color_boundaries(vertices, faces, colors, seam_sensitivity)
+        
+        try:
+            # Use xatlas with seam guidance based on colors
+            atlas = xatlas.Atlas()
+            atlas.add_mesh(vertices, faces)
+            
+            # Generate with color-guided seaming
+            atlas.generate(
+                pack_options=xatlas.PackOptions(
+                    padding=int(uv_margin * 1024),  # Convert margin to texel padding
+                    texels_per_unit=1024,
+                    resolution=1024
+                ),
+                chart_options=xatlas.ChartOptions(
+                    max_iterations=5,  # Moderate iterations for good quality
+                    normal_seam_weight=2.0,  # Reduced since we're using color guidance
+                    texture_seam_weight=0.5
+                )
+            )
+            
+            # Get result
+            vmapping, indices, uvs = atlas[0]
+            
+            # Create unwrapped mesh
+            unwrapped_mesh = trimesh.Trimesh(
+                vertices=vertices[vmapping],
+                faces=indices.reshape(-1, 3),
+                process=False
+            )
+            
+            # Preserve original colors if available
+            if colors is not None:
+                if len(colors) == len(vertices):  # Vertex colors
+                    unwrapped_mesh.visual = trimesh.visual.ColorVisuals(
+                        vertex_colors=colors[vmapping]
+                    )
+                else:  # Face colors
+                    unwrapped_mesh.visual = trimesh.visual.ColorVisuals(
+                        face_colors=colors
+                    )
+            
+            # Add UV coordinates
+            if hasattr(unwrapped_mesh.visual, 'uv'):
+                unwrapped_mesh.visual.uv = uvs
+            else:
+                # Create texture visuals with UVs while preserving colors
+                if hasattr(unwrapped_mesh, 'visual') and hasattr(unwrapped_mesh.visual, 'vertex_colors'):
+                    unwrapped_mesh.visual = trimesh.visual.TextureVisuals(
+                        uv=uvs,
+                        material=trimesh.visual.material.SimpleMaterial(
+                            diffuse=[255, 255, 255, 255]
+                        )
+                    )
+                else:
+                    unwrapped_mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
+            
+            print(f"Colored mesh unwrapped successfully using color-guided seaming")
+            return (unwrapped_mesh,)
+            
+        except Exception as e:
+            print(f"Color-guided unwrap failed: {str(e)}, falling back to standard unwrap")
+            return self.standard_unwrap(colored_mesh, uv_margin)
+    
+    def detect_color_boundaries(self, vertices, faces, colors, sensitivity):
+        """Detect color boundaries to guide seam placement (uvgami approach)"""
+        seam_weights = np.ones(len(vertices), dtype=np.float32)
+        
+        if colors is None:
+            return seam_weights
+        
+        try:
+            # Convert colors to comparable format
+            if len(colors.shape) > 2:
+                colors = colors.reshape(-1, colors.shape[-1])
+            
+            # For each vertex, check color similarity with neighbors
+            for face in faces:
+                for i in range(3):
+                    v1_idx = face[i]
+                    v2_idx = face[(i + 1) % 3]
+                    
+                    if v1_idx < len(colors) and v2_idx < len(colors):
+                        # Calculate color difference
+                        color_diff = np.linalg.norm(colors[v1_idx] - colors[v2_idx])
+                        
+                        # If colors are significantly different, reduce seam weight
+                        # (following uvgami's approach where low weight = avoid seams)
+                        if color_diff > sensitivity:
+                            seam_weights[v1_idx] *= 0.1  # Strongly avoid seams on color boundaries
+                            seam_weights[v2_idx] *= 0.1
+            
+            print(f"Detected color boundaries with sensitivity {sensitivity}")
+            return seam_weights
+            
+        except Exception as e:
+            print(f"Color boundary detection failed: {e}")
+            return seam_weights
+    
+    def standard_unwrap(self, mesh, uv_margin):
+        """Fallback standard unwrap without color guidance"""
+        try:
+            import xatlas
+            
+            vertices = np.array(mesh.vertices, dtype=np.float32)
+            faces = np.array(mesh.faces, dtype=np.uint32)
+            
+            atlas = xatlas.Atlas()
+            atlas.add_mesh(vertices, faces)
+            
+            atlas.generate(
+                pack_options=xatlas.PackOptions(
+                    padding=int(uv_margin * 1024)
+                )
+            )
+            
+            vmapping, indices, uvs = atlas[0]
+            
+            unwrapped_mesh = trimesh.Trimesh(
+                vertices=vertices[vmapping],
+                faces=indices.reshape(-1, 3),
+                process=False
+            )
+            
+            unwrapped_mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
+            
+            return (unwrapped_mesh,)
+            
+        except Exception as e:
+            print(f"Standard unwrap failed: {e}")
+            return (mesh,)  # Return original mesh as fallback
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "split_meshes": ("LIST_TRIMESH",),  # List of mesh parts from PartField Splitter
+                "seam_strategy": (["edge_to_furthest", "boundary_loop", "smart_seam"], {"default": "edge_to_furthest"}),
+                "uv_margin": ("FLOAT", {
+                    "default": 0.02, "min": 0.001, "max": 0.1, "step": 0.001
+                }),
+                "angle_limit": ("FLOAT", {
+                    "default": 66.0, "min": 30.0, "max": 89.0, "step": 1.0
+                }),
+                "pack_uv": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "unwrap_split_mesh"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def unwrap_split_mesh(self, split_meshes, seam_strategy, uv_margin, angle_limit, pack_uv):
+        """Unwrap split meshes quickly and combine into one output"""
+        
+        if not isinstance(split_meshes, list) or len(split_meshes) == 0:
+            raise ValueError("Input must be a non-empty list of mesh parts")
+        
+        print(f"Quick unwrapping {len(split_meshes)} mesh parts...")
+        
+        # Quick unwrap each part
+        unwrapped_parts = []
+        for i, mesh_part in enumerate(split_meshes):
+            if not hasattr(mesh_part, 'vertices') or not hasattr(mesh_part, 'faces'):
+                continue
+            if len(mesh_part.vertices) == 0 or len(mesh_part.faces) == 0:
+                continue
+                
+            print(f"Unwrapping part {i+1}/{len(split_meshes)}...")
+            unwrapped_part = self.quick_unwrap_part(mesh_part, i)
+            
+            if unwrapped_part is not None:
+                unwrapped_parts.append(unwrapped_part)
+        
+        if not unwrapped_parts:
+            raise RuntimeError("No valid mesh parts could be unwrapped")
+        
+        # Just combine all parts into one mesh
+        print(f"Combining {len(unwrapped_parts)} unwrapped parts...")
+        combined_mesh = self.combine_meshes_simple(unwrapped_parts)
+        
+        # Pack UVs with Blender using specified settings
+        print("Packing UVs with Blender (0.005 margin, minimum stretch 10)...")
+        packed_mesh = self.pack_uvs_with_blender(combined_mesh)
+        
+        return (packed_mesh,)
+    
+    def quick_unwrap_part(self, mesh_part, part_index):
+        """Quick unwrap keeping original position, with simple xatlas settings"""
+        try:
+            import xatlas
+        except ImportError:
+            print(f"Warning: xatlas not available, returning original part {part_index}")
+            return mesh_part  # Return original if no xatlas
+        
+        # Convert to numpy arrays
+        vertices = np.array(mesh_part.vertices, dtype=np.float32)
+        faces = np.array(mesh_part.faces, dtype=np.uint32)
+        
+        try:
+            # Simple unwrap with xatlas - no complex options
+            atlas = xatlas.Atlas()
+            atlas.add_mesh(vertices, faces)
+            
+            # Generate with minimal settings (following Fast Per-Part Unwrapping Strategy)
+            atlas.generate()
+            
+            # Get result
+            vmapping, indices, uvs = atlas[0]
+            
+            # Create unwrapped mesh keeping original vertex positions
+            unwrapped_mesh = trimesh_loader.Trimesh(
+                vertices=vertices[vmapping],  # Keep original positions
+                faces=indices.reshape(-1, 3),
+                process=False
+            )
+            
+            # Add UV coordinates
+            unwrapped_mesh.visual = trimesh_loader.visual.TextureVisuals(uv=uvs)
+            
+            print(f"Part {part_index} unwrapped successfully")
+            return unwrapped_mesh
+            
+        except Exception as e:
+            print(f"Unwrap failed for part {part_index}: {e}, returning original")
+            return mesh_part  # Return original on failure
+    
+    def pack_uvs_together(self, unwrapped_parts, temp_dir, uv_margin):
+        """Pack UV islands from multiple meshes using xatlas"""
+        try:
+            import xatlas
+        except ImportError:
+            print("Warning: xatlas not available for UV packing, using simple combination")
+            return self.combine_meshes_simple(unwrapped_parts)
+        
+        print("Packing UVs using xatlas with 10 iterations...")
+        
+        # Combine all meshes first
+        combined_mesh = self.combine_meshes_simple(unwrapped_parts)
+        
+        # Get vertices and faces
+        vertices = np.array(combined_mesh.vertices, dtype=np.float32)
+        faces = np.array(combined_mesh.faces, dtype=np.uint32)
+        
+        try:
+            # Create xatlas atlas for packing
+            atlas = xatlas.Atlas()
+            atlas.add_mesh(vertices, faces)
+            
+            # Generate with packing focus and 10 iterations
+            atlas.generate(
+                pack_options=xatlas.PackOptions(
+                    padding=int(uv_margin * 1024),
+                    texels_per_unit=1024,
+                    resolution=1024,
+                    bruteforce=True,  # Better packing
+                    create_image=False,
+                    rotate_charts_to_axis=True,
+                    rotate_charts=True
+                ),
+                chart_options=xatlas.ChartOptions(
+                    max_iterations=10  # Your requested 10 iterations
+                )
+            )
+            
+            # Get packed result
+            vmapping, indices, uvs = atlas[0]
+            
+            # Create final mesh with packed UVs
+            packed_vertices = vertices[vmapping]
+            packed_mesh = trimesh_loader.Trimesh(
+                vertices=packed_vertices,
+                faces=indices.reshape(-1, 3),
+                process=False
+            )
+            
+            # Add UV coordinates
+            if hasattr(packed_mesh, 'visual'):
+                if not hasattr(packed_mesh.visual, 'uv'):
+                    packed_mesh.visual = trimesh.visual.TextureVisuals()
+                packed_mesh.visual.uv = uvs
+            else:
+                packed_mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
+            
+            print("UV packing completed with xatlas (10 iterations)")
+            return packed_mesh
+            
+        except Exception as e:
+            print(f"Error packing UVs with xatlas: {str(e)}")
+            # Fallback: return first unwrapped part if packing fails
+            if unwrapped_parts:
+                print("Fallback: returning first unwrapped part")
+                return unwrapped_parts[0]
+            return None
+    
+    def combine_meshes_simple(self, mesh_list):
+        """Simple mesh combination without UV processing"""
+        if len(mesh_list) == 1:
+            return mesh_list[0]
+        
+        # Combine vertices and faces keeping original positions
+        all_vertices = []
+        all_faces = []
+        all_uvs = []
+        vertex_offset = 0
+        
+        for mesh in mesh_list:
+            # Add vertices (keep original positions)
+            all_vertices.append(mesh.vertices)
+            
+            # Add faces with vertex offset
+            offset_faces = mesh.faces + vertex_offset
+            all_faces.append(offset_faces)
+            
+            # Add UVs if available
+            if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
+                all_uvs.append(mesh.visual.uv)
+            else:
+                # Create dummy UVs if none exist
+                dummy_uvs = np.zeros((len(mesh.vertices), 2), dtype=np.float32)
+                all_uvs.append(dummy_uvs)
+            
+            vertex_offset += len(mesh.vertices)
+        
+        # Combine all arrays
+        combined_vertices = np.vstack(all_vertices)
+        combined_faces = np.vstack(all_faces)
+        combined_uvs = np.vstack(all_uvs)
+        
+        # Create final mesh
+        final_mesh = trimesh_loader.Trimesh(
+            vertices=combined_vertices,
+            faces=combined_faces,
+            process=False  # No processing, no merge by distance
+        )
+        
+        # Add combined UVs
+        final_mesh.visual = trimesh_loader.visual.TextureVisuals(uv=combined_uvs)
+        
+        print(f"Combined {len(mesh_list)} parts into single mesh (no merge by distance)")
+        return final_mesh
+    
+    def pack_uvs_with_blender(self, mesh):
+        """Pack UVs using Blender with 0.005 margin and minimum stretch 10"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save mesh as OBJ with UVs
+            input_obj = os.path.join(temp_dir, "input_mesh.obj")
+            output_obj = os.path.join(temp_dir, "packed_mesh.obj")
+            
+            try:
+                mesh.export(input_obj)
+            except Exception as e:
+                print(f"Failed to export mesh for UV packing: {e}")
+                return mesh
+            
+            # Create Blender script for UV packing
+            script_content = f"""
+import bpy
+import sys
+
+try:
+    # Clear existing objects
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    
+    # Import the mesh
+    bpy.ops.wm.obj_import(filepath=r'{input_obj}')
+    
+    # Get the imported object
+    obj = bpy.context.selected_objects[0]
+    bpy.context.view_layer.objects.active = obj
+    
+    # Ensure we have a UV map
+    if not obj.data.uv_layers:
+        obj.data.uv_layers.new()
+    
+    # Switch to Edit mode
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    
+    # First do a basic unwrap to get proper UV coordinates
+    bpy.ops.uv.unwrap(method='ANGLE_BASED')
+    
+    # Now pack the UV islands with specified settings
+    bpy.ops.uv.pack_islands(
+        margin=0.005  # 0.005 margin as requested
+    )
+    
+    # Switch back to Object mode
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Export with UVs
+    bpy.ops.wm.obj_export(
+        filepath=r'{output_obj}',
+        export_selected_objects=True,
+        export_uv=True,
+        export_materials=False
+    )
+    
+    print("UV packing completed successfully")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"Blender UV packing failed: {{e}}", file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            
+            # Write script to temporary file
+            script_file = os.path.join(temp_dir, "pack_uvs.py")
+            with open(script_file, 'w') as f:
+                f.write(script_content)
+            
+            try:
+                # Run Blender script
+                blender_exe = get_blender_path()
+                cmd = [blender_exe, "--background", "--python", script_file]
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=temp_dir,
+                    timeout=120
+                )
+                
+                if result.stdout:
+                    print(f"Blender UV packing stdout: {result.stdout.strip()}")
+                if result.stderr:
+                    print(f"Blender UV packing stderr: {result.stderr.strip()}")
+                
+                # Load the packed result
+                if os.path.exists(output_obj):
+                    packed_mesh = trimesh_loader.load(output_obj)
+                    print("UV packing with Blender completed successfully")
+                    return packed_mesh
+                else:
+                    print("Warning: Blender UV packing failed, no output file generated")
+                    return mesh
+                    
+            except Exception as e:
+                print(f"Error running Blender UV packing: {str(e)}")
+                return mesh
+
+class BlenderPreview:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "render_thumbnails"
+    CATEGORY = "Comfy_BlenderTools/Preview"
+
+    def _load_image_to_tensor(self, image_path):
+        if not os.path.exists(image_path):
+            print(f"Warning: Output image not found at {image_path}. Returning black image.")
+            return torch.zeros((1, 2048, 2048, 3), dtype=torch.float32)
+        
+        try:
+            img = Image.open(image_path)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img_np = np.array(img).astype(np.float32) / 255.0
+            return torch.from_numpy(img_np).unsqueeze(0)
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+            return torch.zeros((1, 2048, 2048, 3), dtype=torch.float32)
+
+    def render_thumbnails(self, trimesh):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "input_mesh.glb")
+            trimesh.export(file_obj=input_mesh_path)
+            
+            material_output_path = os.path.join(temp_dir, "material.png")
+            wireframe_output_path = os.path.join(temp_dir, "wireframe.png")
+            normal_output_path = os.path.join(temp_dir, "normal.png")
+            script_path = os.path.join(temp_dir, "render_script.py")
+
+            script_params = {
+                'input_mesh': repr(input_mesh_path.replace('\\', '/')),
+                'material_output': repr(material_output_path.replace('\\', '/')),
+                'wireframe_output': repr(wireframe_output_path.replace('\\', '/')),
+                'normal_output': repr(normal_output_path.replace('\\', '/')),
+            }
+
+            blender_script = f"""
+import bpy, sys, os
+from math import radians
+from mathutils import Vector
+
+p = {{ {', '.join(f'"{k}": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    scene = bpy.context.scene
+    scene.render.engine = 'CYCLES'
+    scene.render.resolution_x = 2048
+    scene.render.resolution_y = 2048
+    scene.render.film_transparent = True
+    scene.cycles.samples = 128
+    scene.cycles.use_denoising = True
+
+    try:
+        cprefs = bpy.context.preferences.addons['cycles'].preferences
+        cprefs.get_devices()
+        
+        for device_type in ('CUDA', 'OPTIX', 'HIP', 'METAL'):
+            if any(d.type == device_type for d in cprefs.devices):
+                cprefs.compute_device_type = device_type
+                break
+        
+        for device in cprefs.devices:
+            if device.type == cprefs.compute_device_type:
+                device.use = True
+
+        scene.cycles.device = 'GPU'
+        print(f"Successfully configured GPU for rendering with {{cprefs.compute_device_type}}.")
+    except Exception as e:
+        print(f"GPU rendering setup failed: {{e}}")
+        print("Falling back to CPU.")
+        scene.cycles.device = 'CPU'
+
+    bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    
+    bpy.ops.object.camera_add(location=(0,0,0))
+    camera_obj = bpy.context.active_object
+    scene.camera = camera_obj
+    
+    empty_target = bpy.data.objects.new("LookAtTarget", None)
+    scene.collection.objects.link(empty_target)
+    empty_target.location = (0, 0, 0)
+    
+    if obj:
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+        obj.location = (0, 0, 0)
+        obj.rotation_euler = (0, 0, 0)
+        
+        max_dim = max(obj.dimensions)
+        
+        camera_obj.location = Vector((0, -max_dim * 2.5, max_dim * 0.5))
+
+        constraint = camera_obj.constraints.new(type='TRACK_TO')
+        constraint.target = empty_target
+    
+    bpy.ops.object.light_add(type='AREA', location=(-5, -5, 5))
+    key_light = bpy.context.active_object
+    key_light.data.energy = 1500
+    key_light.data.size = 3
+    key_constraint = key_light.constraints.new(type='TRACK_TO')
+    key_constraint.target = empty_target
+    
+    bpy.ops.object.light_add(type='AREA', location=(5, -4, 2))
+    fill_light = bpy.context.active_object
+    fill_light.data.energy = 700
+    fill_light.data.size = 4
+    fill_constraint = fill_light.constraints.new(type='TRACK_TO')
+    fill_constraint.target = empty_target
+
+    bpy.ops.object.light_add(type='AREA', location=(-2, 5, 2))
+    rim_light = bpy.context.active_object
+    rim_light.data.energy = 1000
+    rim_light.data.size = 3
+    rim_constraint = rim_light.constraints.new(type='TRACK_TO')
+    rim_constraint.target = empty_target
+
+    scene.view_layers[0].material_override = None
+    scene.render.filepath = p['material_output']
+    bpy.ops.render.render(write_still=True)
+    
+    wire_mat = bpy.data.materials.new(name="WireframeMaterial")
+    wire_mat.use_nodes = True
+    nodes = wire_mat.node_tree.nodes
+    nodes.clear()
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    emission_node = nodes.new(type='ShaderNodeEmission')
+    emission_node.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+    mix_shader = nodes.new(type='ShaderNodeMixShader')
+    wire_node = nodes.new(type='ShaderNodeWireframe')
+    wire_node.inputs['Size'].default_value = 0.005
+    transparent_node = nodes.new(type='ShaderNodeBsdfTransparent')
+    
+    wire_mat.node_tree.links.new(wire_node.outputs['Fac'], mix_shader.inputs['Fac'])
+    wire_mat.node_tree.links.new(transparent_node.outputs['BSDF'], mix_shader.inputs[1])
+    wire_mat.node_tree.links.new(emission_node.outputs['Emission'], mix_shader.inputs[2])
+    wire_mat.node_tree.links.new(mix_shader.outputs['Shader'], output_node.inputs['Surface'])
+    
+    scene.view_layers[0].material_override = wire_mat
+    scene.render.filepath = p['wireframe_output']
+    bpy.ops.render.render(write_still=True)
+
+    normal_mat = bpy.data.materials.new(name="NormalMaterial")
+    normal_mat.use_nodes = True
+    nodes = normal_mat.node_tree.nodes
+    nodes.clear()
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    geo_node = nodes.new(type='ShaderNodeNewGeometry')
+    vec_transform_node = nodes.new(type='ShaderNodeVectorTransform')
+    vec_math_scale = nodes.new(type='ShaderNodeVectorMath')
+    vec_math_add = nodes.new(type='ShaderNodeVectorMath')
+    vec_transform_node.vector_type = 'NORMAL'
+    vec_transform_node.convert_from = 'WORLD'
+    vec_transform_node.convert_to = 'OBJECT'
+    vec_math_scale.operation = 'SCALE'
+    vec_math_scale.inputs[1].default_value = (0.5, 0.5, 0.5)
+    vec_math_add.operation = 'ADD'
+    vec_math_add.inputs[1].default_value = (0.5, 0.5, 0.5)
+    links = normal_mat.node_tree.links
+    links.new(geo_node.outputs['Normal'], vec_transform_node.inputs['Vector'])
+    links.new(vec_transform_node.outputs['Vector'], vec_math_scale.inputs[0])
+    links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
+    links.new(vec_math_add.outputs['Vector'], output_node.inputs['Surface'])
+    
+    scene.view_layers[0].material_override = normal_mat
+    scene.render.filepath = p['normal_output']
+    bpy.ops.render.render(write_still=True)
+    
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(blender_script)
+
+            _run_blender_script(script_path)
+
+            material_img = self._load_image_to_tensor(material_output_path)
+            wireframe_img = self._load_image_to_tensor(wireframe_output_path)
+            normal_img = self._load_image_to_tensor(normal_output_path)
+            
+            batched_images = torch.cat((material_img, wireframe_img, normal_img), 0)
+
+            return (batched_images,)
