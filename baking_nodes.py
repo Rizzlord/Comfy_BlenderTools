@@ -19,6 +19,8 @@ class TextureBake:
                 "high_poly_mesh": ("TRIMESH",),
                 "low_poly_mesh": ("TRIMESH",),
                 "resolution": (cls.RESOLUTIONS, {"default": "2048"}),
+                "bake_albedo": ("BOOLEAN", {"default": True}),
+                "bake_mr_map": ("BOOLEAN", {"default": True}),
                 "bake_normal": ("BOOLEAN", {"default": True}),
                 "bake_ao": ("BOOLEAN", {"default": True}),
                 "ao_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
@@ -28,35 +30,63 @@ class TextureBake:
                 "cavity_contrast": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1}),
                 "cage_extrusion": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_ray_distance": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "margin": ("INT", {"default": 16, "min": 0, "max": 64}),
+                "margin": ("INT", {"default": 1024, "min": 0, "max": 2048}),
+                "use_high_poly_textures": ("BOOLEAN", {"default": False}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
             }
         }
 
     RETURN_TYPES = ("TRIMESH", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "rm_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
+    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "mr_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
-    def bake(self, high_poly_mesh, low_poly_mesh, resolution, bake_normal, bake_ao, ao_strength,
+    def bake(self, high_poly_mesh, low_poly_mesh, resolution, bake_albedo, bake_mr_map, bake_normal, bake_ao, ao_strength,
              bake_thickness, thickness_strength, bake_cavity, cavity_contrast,
-             cage_extrusion, max_ray_distance, margin, use_gpu):
+             cage_extrusion, max_ray_distance, margin, use_high_poly_textures, use_gpu):
 
-        albedo_map_tensor = None
-        rm_map_tensor = None
         dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
-        if hasattr(low_poly_mesh, 'visual') and hasattr(low_poly_mesh.visual, 'material'):
-            mat = low_poly_mesh.visual.material
-            if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
-                pil_img = mat.baseColorTexture.convert('RGB')
-                img_array = np.array(pil_img).astype(np.float32) / 255.0
-                albedo_map_tensor = torch.from_numpy(img_array)[None,]
-            
-            if hasattr(mat, 'metallicRoughnessTexture') and mat.metallicRoughnessTexture is not None:
-                pil_mr_img = mat.metallicRoughnessTexture.convert('RGB')
-                mr_array = np.array(pil_mr_img).astype(np.float32) / 255.0
-                rm_map_tensor = torch.from_numpy(mr_array)[None,]
+        def get_material(mesh):
+            if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'material'):
+                return mesh.visual.material
+            return None
+
+        high_material = get_material(high_poly_mesh)
+        low_material = get_material(low_poly_mesh)
+
+        def tensor_from_material_texture(material, attr):
+            if material is None or not hasattr(material, attr):
+                return None
+            texture = getattr(material, attr)
+            if texture is None:
+                return None
+            pil_img = texture.convert('RGB')
+            img_array = np.array(pil_img).astype(np.float32) / 255.0
+            return torch.from_numpy(img_array)[None,]
+
+        # Preserve existing textures for output, preferring low-poly then high-poly
+        albedo_map_tensor = tensor_from_material_texture(low_material, 'baseColorTexture')
+        if albedo_map_tensor is None:
+            albedo_map_tensor = tensor_from_material_texture(high_material, 'baseColorTexture')
+
+        mr_map_tensor = tensor_from_material_texture(low_material, 'metallicRoughnessTexture')
+        if mr_map_tensor is None:
+            mr_map_tensor = tensor_from_material_texture(high_material, 'metallicRoughnessTexture')
+
+        def select_texture_image(attr):
+            material_order = [high_material, low_material] if use_high_poly_textures else [low_material, high_material]
+            for material in material_order:
+                if material is None or not hasattr(material, attr):
+                    continue
+                texture = getattr(material, attr)
+                if texture is None:
+                    continue
+                return texture.convert('RGB')
+            return None
+
+        selected_albedo_image = select_texture_image('baseColorTexture')
+        selected_mr_image = select_texture_image('metallicRoughnessTexture')
 
         original_material = low_poly_mesh.visual.material if hasattr(low_poly_mesh.visual, 'material') else None
 
@@ -69,15 +99,28 @@ class TextureBake:
             high_poly_mesh.export(file_obj=high_poly_path)
             low_poly_mesh.export(file_obj=low_poly_path)
 
+            albedo_texture_path = None
+            if selected_albedo_image is not None:
+                albedo_texture_path = os.path.join(temp_dir, "source_albedo.png")
+                selected_albedo_image.save(albedo_texture_path)
+
+            mr_texture_path = None
+            if selected_mr_image is not None:
+                mr_texture_path = os.path.join(temp_dir, "source_mr.png")
+                selected_mr_image.save(mr_texture_path)
+
             params = {
                 'high_poly_path': high_poly_path, 'low_poly_path': low_poly_path,
                 'final_low_poly_path': final_low_poly_path, 'temp_dir': temp_dir,
-                'bake_normal': bake_normal, 
+                'bake_albedo': bake_albedo, 'bake_mr': bake_mr_map, 'bake_normal': bake_normal, 
                 'bake_ao': bake_ao, 'ao_strength': ao_strength, 'bake_thickness': bake_thickness, 
                 'thickness_strength': thickness_strength, 'bake_cavity': bake_cavity, 
                 'cavity_contrast': cavity_contrast, 'resolution': int(resolution), 
                 'cage_extrusion': cage_extrusion, 'max_ray_distance': max_ray_distance, 'margin': margin,
-                'use_gpu': use_gpu
+                'use_high_poly_textures': use_high_poly_textures,
+                'use_gpu': use_gpu,
+                'albedo_texture_path': albedo_texture_path,
+                'mr_texture_path': mr_texture_path
             }
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -151,6 +194,157 @@ def setup_lowpoly_material(low_obj):
     nodes.active = tex_node
     return mat, tex_node
 
+def load_image_resource(path, colorspace):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        image = bpy.data.images.load(path, check_existing=True)
+    except Exception:
+        image = bpy.data.images.load(path)
+    image.colorspace_settings.name = colorspace
+    return image
+
+def apply_highpoly_textures(high_obj):
+    albedo_image = load_image_resource(p.get('albedo_texture_path'), 'sRGB')
+    mr_image = load_image_resource(p.get('mr_texture_path'), 'Non-Color')
+    if albedo_image is None and mr_image is None:
+        return
+
+    if not high_obj.data.materials:
+        mat = bpy.data.materials.new(name="TextureBakeHigh")
+        high_obj.data.materials.append(mat)
+
+    for i, mat in enumerate(high_obj.data.materials):
+        if mat is None:
+            mat = bpy.data.materials.new(name=f"TextureBakeHigh_{{i}}")
+            high_obj.data.materials[i] = mat
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+        principled = nodes.new('ShaderNodeBsdfPrincipled')
+        output = nodes.new('ShaderNodeOutputMaterial')
+        links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+
+        if albedo_image:
+            albedo_node = nodes.new('ShaderNodeTexImage')
+            albedo_node.image = albedo_image
+            albedo_node.interpolation = 'Smart'
+            albedo_node.name = "TextureBake_Albedo"
+            links.new(albedo_node.outputs['Color'], principled.inputs['Base Color'])
+
+        if mr_image:
+            mr_node = nodes.new('ShaderNodeTexImage')
+            mr_node.image = mr_image
+            mr_node.image.colorspace_settings.name = 'Non-Color'
+            mr_node.interpolation = 'Smart'
+            mr_node.name = "TextureBake_MetallicRoughness"
+            separate = nodes.new('ShaderNodeSeparateRGB')
+            links.new(mr_node.outputs['Color'], separate.inputs['Image'])
+            links.new(separate.outputs['G'], principled.inputs['Roughness'])
+            links.new(separate.outputs['B'], principled.inputs['Metallic'])
+
+def enable_emission_bake(obj):
+    overrides = []
+    for mat in obj.data.materials:
+        if not mat or not mat.use_nodes:
+            continue
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        output_node = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        if not output_node:
+            continue
+        surface_socket = output_node.inputs.get('Surface')
+        if surface_socket is None:
+            continue
+        surface_links = [l for l in links if l.to_node == output_node and l.to_socket == surface_socket]
+        if not surface_links:
+            continue
+        principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        source_socket = None
+        default_color = (1.0, 1.0, 1.0, 1.0)
+        if principled:
+            base_color_input = principled.inputs.get('Base Color')
+            if base_color_input is not None:
+                if base_color_input.is_linked:
+                    source_socket = base_color_input.links[0].from_socket
+                else:
+                    default_color = tuple(base_color_input.default_value)
+        emission = nodes.new('ShaderNodeEmission')
+        emission.name = 'TextureBakeEmission'
+        emission.inputs['Strength'].default_value = 1.0
+        if source_socket:
+            links.new(source_socket, emission.inputs['Color'])
+        else:
+            emission.inputs['Color'].default_value = default_color
+        stored_links = []
+        for link in surface_links:
+            stored_links.append((link.from_socket, surface_socket))
+            links.remove(link)
+        links.new(emission.outputs['Emission'], surface_socket)
+        overrides.append({{'material': mat, 'emission': emission, 'links': stored_links}})
+    return overrides
+
+def enable_mr_emission_bake(obj):
+    overrides = []
+    for mat in obj.data.materials:
+        if not mat or not mat.use_nodes:
+            continue
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        output_node = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+        if not output_node:
+            continue
+        surface_socket = output_node.inputs.get('Surface')
+        if surface_socket is None:
+            continue
+        surface_links = [l for l in links if l.to_node == output_node and l.to_socket == surface_socket]
+        if not surface_links:
+            continue
+
+        mr_node = nodes.get('TextureBake_MetallicRoughness')
+        if mr_node is None or not getattr(mr_node, 'image', None):
+            continue
+
+        emission = nodes.new('ShaderNodeEmission')
+        emission.name = 'TextureBakeEmissionMR'
+        emission.inputs['Strength'].default_value = 1.0
+        links.new(mr_node.outputs['Color'], emission.inputs['Color'])
+
+        stored_links = []
+        for link in surface_links:
+            stored_links.append((link.from_socket, surface_socket))
+            links.remove(link)
+        links.new(emission.outputs['Emission'], surface_socket)
+        overrides.append({{'material': mat, 'emission': emission, 'links': stored_links}})
+    return overrides
+
+def restore_emission_bake(overrides):
+    if overrides is None:
+        return
+    for data in overrides:
+        mat = data.get('material')
+        emission = data.get('emission')
+        stored_links = data.get('links', [])
+        if not mat or not mat.use_nodes:
+            continue
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        for link in list(links):
+            if link.from_node == emission or link.to_node == emission:
+                links.remove(link)
+        try:
+            nodes.remove(emission)
+        except Exception:
+            emission_node = nodes.get(getattr(emission, 'name', None))
+            if emission_node:
+                nodes.remove(emission_node)
+        for from_socket, to_socket in stored_links:
+            try:
+                links.new(from_socket, to_socket)
+            except Exception as exc:
+                print("Warning: failed to restore material link: " + str(exc))
+
 def process_and_save_map(image, output_path, invert=False, strength=1.0, white_bg=False):
     comp_scene = bpy.context.scene
     comp_scene.use_nodes = True
@@ -210,12 +404,42 @@ def execute_bake(bake_type, tex_node):
 try:
     setup_scene()
     high_obj, low_obj = import_meshes()
+    apply_highpoly_textures(high_obj)
     low_poly_mat, tex_node = setup_lowpoly_material(low_obj)
 
     bpy.ops.object.select_all(action='DESELECT')
     high_obj.select_set(True); low_obj.select_set(True)
     bpy.context.view_layer.objects.active = low_obj
     
+    if p['bake_albedo']:
+        emission_overrides = enable_emission_bake(high_obj)
+        diffuse_image = None
+        try:
+            diffuse_image = execute_bake('EMIT', tex_node)
+            output_path = os.path.join(p['temp_dir'], "albedo_map.png")
+            diffuse_image.filepath_raw = output_path
+            diffuse_image.file_format = 'PNG'
+            diffuse_image.save()
+        finally:
+            if diffuse_image is not None:
+                bpy.data.images.remove(diffuse_image)
+            restore_emission_bake(emission_overrides)
+
+    if p['bake_mr']:
+        mr_overrides = enable_mr_emission_bake(high_obj)
+        mr_image = None
+        try:
+            if mr_overrides:
+                mr_image = execute_bake('EMIT', tex_node)
+                output_path = os.path.join(p['temp_dir'], "mr_map.png")
+                mr_image.filepath_raw = output_path
+                mr_image.file_format = 'PNG'
+                mr_image.save()
+        finally:
+            if mr_image is not None:
+                bpy.data.images.remove(mr_image)
+            restore_emission_bake(mr_overrides)
+
     if p['bake_normal']:
         normal_image = execute_bake('NORMAL', tex_node)
         output_path = os.path.join(p['temp_dir'], "normal_map.png")
@@ -282,6 +506,14 @@ except Exception as e:
                 img = Image.open(path).convert('RGB')
                 return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
+            albedo_bake_tensor = load_image_as_tensor(os.path.join(temp_dir, "albedo_map.png"))
+            if albedo_bake_tensor is not None:
+                albedo_map_tensor = albedo_bake_tensor
+
+            mr_bake_tensor = load_image_as_tensor(os.path.join(temp_dir, "mr_map.png"))
+            if mr_bake_tensor is not None:
+                mr_map_tensor = mr_bake_tensor
+
             normal_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "normal_map.png"))
             ao_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "ao_map.png"))
             thickness_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "thickness_map.png"))
@@ -304,7 +536,7 @@ except Exception as e:
             return (final_mesh,
                     albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
                     normal_map_tensor if normal_map_tensor is not None else dummy_image,
-                    rm_map_tensor if rm_map_tensor is not None else dummy_image,
+                    mr_map_tensor if mr_map_tensor is not None else dummy_image,
                     ao_map_tensor if ao_map_tensor is not None else dummy_image,
                     thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
                     cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
@@ -320,7 +552,7 @@ class ApplyMaterial:
             "optional": {
                 "albedo_map": ("IMAGE",),
                 "normal_map": ("IMAGE",),
-                "metallic_roughness_map": ("IMAGE",),
+                "mr_map": ("IMAGE",),
                 "ao_map": ("IMAGE",),
             }
         }
@@ -330,7 +562,7 @@ class ApplyMaterial:
     FUNCTION = "apply"
     CATEGORY = "Comfy_BlenderTools"
 
-    def apply(self, mesh, albedo_map=None, normal_map=None, metallic_roughness_map=None, ao_map=None):
+    def apply(self, mesh, albedo_map=None, normal_map=None, mr_map=None, ao_map=None):
         new_mesh = mesh.copy()
         if not hasattr(new_mesh, 'visual') or not hasattr(new_mesh.visual, 'uv'):
             raise Exception("Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node.")
@@ -364,7 +596,7 @@ class ApplyMaterial:
 
         material.baseColorTexture = base_color_texture
         material.normalTexture = tensor_to_pil(normal_map)
-        material.metallicRoughnessTexture = tensor_to_pil(metallic_roughness_map)
+        material.metallicRoughnessTexture = tensor_to_pil(mr_map)
         material.occlusionTexture = tensor_to_pil(ao_map)
 
         new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
@@ -381,7 +613,7 @@ class ExtractMaterial:
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("albedo_map", "normal_map", "metallic_roughness_map", "ao_map")
+    RETURN_NAMES = ("albedo_map", "normal_map", "mr_map", "ao_map")
     FUNCTION = "extract"
     CATEGORY = "Comfy_BlenderTools"
 
