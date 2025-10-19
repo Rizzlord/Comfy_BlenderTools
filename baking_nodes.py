@@ -6,7 +6,7 @@ import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
 class TextureBake:
@@ -33,17 +33,22 @@ class TextureBake:
                 "margin": ("INT", {"default": 1024, "min": 0, "max": 2048}),
                 "use_high_poly_textures": ("BOOLEAN", {"default": False}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
+                "blur_atc": ("BOOLEAN", {"default": True}),
+                "atc_blur_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1}),
+                "blur_mr": ("BOOLEAN", {"default": False}),
+                "mr_blur_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1}),
             }
         }
 
     RETURN_TYPES = ("TRIMESH", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "mr_map", "ao_map", "thickness_map", "cavity_map", "ATC_map")
+    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "mr_map", "ao_map", "thickness_map", "cavity_map", "atc_map")
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
     def bake(self, high_poly_mesh, low_poly_mesh, resolution, bake_albedo, bake_mr_map, bake_normal, bake_ao, ao_strength,
              bake_thickness, thickness_strength, bake_cavity, cavity_contrast,
-             cage_extrusion, max_ray_distance, margin, use_high_poly_textures, use_gpu):
+             cage_extrusion, max_ray_distance, margin, use_high_poly_textures, use_gpu,
+             blur_atc, atc_blur_strength, blur_mr, mr_blur_strength):
 
         dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
@@ -513,6 +518,8 @@ except Exception as e:
             mr_bake_tensor = load_image_as_tensor(os.path.join(temp_dir, "mr_map.png"))
             if mr_bake_tensor is not None:
                 mr_map_tensor = mr_bake_tensor
+            if blur_mr and mr_map_tensor is not None:
+                mr_map_tensor = self._blur_image_tensor(mr_map_tensor, mr_blur_strength)
 
             normal_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "normal_map.png"))
             ao_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "ao_map.png"))
@@ -528,6 +535,8 @@ except Exception as e:
                 b_channel = cavity_map_tensor[:, :, :, 0:1] if cavity_map_tensor is not None else black_channel
                 
                 atc_map_tensor = torch.cat([r_channel, g_channel, b_channel], dim=-1)
+            if atc_map_tensor is not None and blur_atc:
+                atc_map_tensor = self._blur_image_tensor(atc_map_tensor, atc_blur_strength)
 
             final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
             if original_material:
@@ -541,7 +550,36 @@ except Exception as e:
                     thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
                     cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
                     atc_map_tensor if atc_map_tensor is not None else dummy_image)
-        
+
+    @staticmethod
+    def _blur_image_tensor(image_tensor, strength):
+        if image_tensor is None:
+            return None
+        if strength is None or strength <= 0:
+            return image_tensor
+        if not torch.is_tensor(image_tensor):
+            return image_tensor
+        if image_tensor.ndim != 4 or image_tensor.shape[0] == 0:
+            return image_tensor
+
+        device = image_tensor.device
+        dtype = image_tensor.dtype
+        radius = float(strength)
+
+        blurred_batches = []
+        for i in range(image_tensor.shape[0]):
+            img_array = image_tensor[i].detach().cpu().numpy()
+            img_array = np.clip(img_array, 0.0, 1.0)
+            pil_img = Image.fromarray((img_array * 255.0).astype(np.uint8))
+            blurred_pil = pil_img.filter(ImageFilter.GaussianBlur(radius=radius))
+            blurred_np = np.array(blurred_pil).astype(np.float32) / 255.0
+            if blurred_np.ndim == 2:
+                blurred_np = blurred_np[:, :, None]
+            blurred_batches.append(torch.from_numpy(blurred_np))
+
+        result = torch.stack(blurred_batches, dim=0)
+        return result.to(device=device, dtype=dtype)
+
 class ApplyMaterial:
     @classmethod
     def INPUT_TYPES(cls):
