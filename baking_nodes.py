@@ -56,32 +56,25 @@ class TextureBake:
             if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'material'):
                 return mesh.visual.material
             return None
-
         high_material = get_material(high_poly_mesh)
         low_material = get_material(low_poly_mesh)
 
-        def tensor_from_material_texture(material, attr):
-            if material is None or not hasattr(material, attr):
-                return None
-            texture = getattr(material, attr)
-            if texture is None:
-                return None
-            pil_img = texture.convert('RGB')
-            img_array = np.array(pil_img).astype(np.float32) / 255.0
-            return torch.from_numpy(img_array)[None,]
+        material_preference = [high_material, low_material] if use_high_poly_textures else [low_material, high_material]
 
-        # Preserve existing textures for output, preferring low-poly then high-poly
-        albedo_map_tensor = tensor_from_material_texture(low_material, 'baseColorTexture')
-        if albedo_map_tensor is None:
-            albedo_map_tensor = tensor_from_material_texture(high_material, 'baseColorTexture')
-
-        mr_map_tensor = tensor_from_material_texture(low_material, 'metallicRoughnessTexture')
-        if mr_map_tensor is None:
-            mr_map_tensor = tensor_from_material_texture(high_material, 'metallicRoughnessTexture')
+        def tensor_from_materials(materials, attr):
+            for material in materials:
+                if material is None or not hasattr(material, attr):
+                    continue
+                texture = getattr(material, attr)
+                if texture is None:
+                    continue
+                pil_img = texture.convert('RGB')
+                img_array = np.array(pil_img).astype(np.float32) / 255.0
+                return torch.from_numpy(img_array)[None,]
+            return None
 
         def select_texture_image(attr):
-            material_order = [high_material, low_material] if use_high_poly_textures else [low_material, high_material]
-            for material in material_order:
+            for material in material_preference:
                 if material is None or not hasattr(material, attr):
                     continue
                 texture = getattr(material, attr)
@@ -89,6 +82,13 @@ class TextureBake:
                     continue
                 return texture.convert('RGB')
             return None
+
+        albedo_map_tensor = tensor_from_materials(material_preference, 'baseColorTexture')
+        mr_map_tensor = tensor_from_materials(material_preference, 'metallicRoughnessTexture')
+        normal_map_tensor = tensor_from_materials(material_preference, 'normalTexture')
+        ao_map_tensor = tensor_from_materials(material_preference, 'occlusionTexture')
+        thickness_map_tensor = None
+        cavity_map_tensor = None
 
         selected_albedo_image = select_texture_image('baseColorTexture')
         selected_mr_image = select_texture_image('metallicRoughnessTexture')
@@ -539,8 +539,34 @@ except Exception as e:
                 atc_map_tensor = self._blur_image_tensor(atc_map_tensor, atc_blur_strength)
 
             final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
-            if original_material:
-                final_mesh.visual.material = original_material
+            uv_data = final_mesh.visual.uv if hasattr(final_mesh.visual, 'uv') else None
+
+            def tensor_to_pil(tensor):
+                if tensor is None:
+                    return None
+                array = np.clip(tensor[0].cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+                return Image.fromarray(array)
+
+            final_material = original_material if original_material else trimesh_loader.visual.material.PBRMaterial()
+
+            base_color_texture = tensor_to_pil(albedo_map_tensor)
+            metallic_roughness_texture = tensor_to_pil(mr_map_tensor)
+            normal_texture = tensor_to_pil(normal_map_tensor)
+            ao_texture = tensor_to_pil(ao_map_tensor)
+
+            if base_color_texture is not None:
+                final_material.baseColorTexture = base_color_texture
+            if metallic_roughness_texture is not None:
+                final_material.metallicRoughnessTexture = metallic_roughness_texture
+            if normal_texture is not None:
+                final_material.normalTexture = normal_texture
+            if ao_texture is not None:
+                final_material.occlusionTexture = ao_texture
+
+            if uv_data is not None:
+                final_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=uv_data, material=final_material)
+            else:
+                final_mesh.visual.material = final_material
 
             return (final_mesh,
                     albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
