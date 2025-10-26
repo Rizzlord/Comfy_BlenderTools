@@ -410,7 +410,7 @@ class VertexColorBake:
                 "bake_type": (cls.BAKE_TYPES, {"default": "diffuse"}),
                 "cage_extrusion": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "max_ray_distance": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "margin": ("INT", {"default": 64, "min": 0, "max": 64}),
+                "margin": ("INT", {"default": 1024, "min": 0, "max": 2048}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
                 "brightness": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "contrast": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 2.0, "step": 0.01}),

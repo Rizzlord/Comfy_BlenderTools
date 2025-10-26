@@ -631,7 +631,11 @@ class ApplyMaterial:
         if not hasattr(new_mesh, 'visual') or not hasattr(new_mesh.visual, 'uv'):
             raise Exception("Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node.")
 
-        material = trimesh_loader.visual.material.PBRMaterial()
+        material = None
+        if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
+            material = mesh.visual.material.copy()
+        else:
+            material = trimesh_loader.visual.material.PBRMaterial()
 
         def tensor_to_pil(tensor):
             if tensor is None:
@@ -652,16 +656,19 @@ class ApplyMaterial:
             img_array = np.array([black, purple], dtype=np.uint8)[pattern]
             return Image.fromarray(img_array, 'RGB')
 
-        base_color_texture = None
         if albedo_map is not None:
-            base_color_texture = tensor_to_pil(albedo_map)
-        else:
-            base_color_texture = create_checker_map_pil()
+            material.baseColorTexture = tensor_to_pil(albedo_map)
+        elif not hasattr(material, 'baseColorTexture') or material.baseColorTexture is None:
+            material.baseColorTexture = create_checker_map_pil()
 
-        material.baseColorTexture = base_color_texture
-        material.normalTexture = tensor_to_pil(normal_map)
-        material.metallicRoughnessTexture = tensor_to_pil(mr_map)
-        material.occlusionTexture = tensor_to_pil(ao_map)
+        if normal_map is not None:
+            material.normalTexture = tensor_to_pil(normal_map)
+        
+        if mr_map is not None:
+            material.metallicRoughnessTexture = tensor_to_pil(mr_map)
+
+        if ao_map is not None:
+            material.occlusionTexture = tensor_to_pil(ao_map)
 
         new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
 
