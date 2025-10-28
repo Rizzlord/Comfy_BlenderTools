@@ -563,9 +563,9 @@ class BlenderExportGLB:
             final_output_dir = os.path.join(folder_paths.get_output_directory(), output_path)
         else:
             final_output_dir = output_path
-        
+
         os.makedirs(final_output_dir, exist_ok=True)
-        
+
         base_filepath = os.path.join(final_output_dir, filename_prefix)
         counter = 1
         final_glb_path = f"{base_filepath}_{counter:05}_.glb"
@@ -573,9 +573,19 @@ class BlenderExportGLB:
             counter += 1
             final_glb_path = f"{base_filepath}_{counter:05}_.glb"
 
+        original_material = None
+        original_uv = None
+        if hasattr(trimesh, 'visual'):
+            if hasattr(trimesh.visual, 'material') and trimesh.visual.material is not None:
+                original_material = trimesh.visual.material.copy()
+            if hasattr(trimesh.visual, 'uv') and trimesh.visual.uv is not None:
+                original_uv = np.array(trimesh.visual.uv, copy=True)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_glb_path = os.path.join(temp_dir, "temp.glb")
             trimesh.export(temp_glb_path)
+
+            cleaned_glb_path = os.path.join(temp_dir, "cleaned.glb")
 
             script_path = os.path.join(temp_dir, "clean_and_export.py")
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -583,7 +593,7 @@ class BlenderExportGLB:
             script = f"""
 {clean_mesh_func_script}
 import bpy, sys
-p = {{'in_glb': r'{temp_glb_path}', 'out_glb': r'{final_glb_path}', 'merge_dist': {merge_distance}}}
+p = {{'in_glb': r'{temp_glb_path}', 'out_glb': r'{cleaned_glb_path}', 'merge_dist': {merge_distance}}}
 try:
     for obj in bpy.data.objects:
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -608,5 +618,27 @@ except Exception as e:
 """
             with open(script_path, 'w') as f: f.write(script)
             _run_blender_script(script_path)
+
+            if not os.path.exists(cleaned_glb_path):
+                raise FileNotFoundError(f"Blender did not produce cleaned GLB at {cleaned_glb_path}")
+
+            cleaned_mesh = trimesh_loader.load(cleaned_glb_path, force="mesh")
+
+            final_material = None
+            if original_material is not None:
+                final_material = original_material.copy()
+            elif hasattr(cleaned_mesh.visual, 'material') and cleaned_mesh.visual.material is not None:
+                final_material = cleaned_mesh.visual.material
+
+            uv_data = cleaned_mesh.visual.uv if hasattr(cleaned_mesh.visual, 'uv') else None
+            if uv_data is None and original_uv is not None:
+                uv_data = original_uv
+
+            if final_material is not None and uv_data is not None:
+                cleaned_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=uv_data, material=final_material)
+            elif final_material is not None:
+                cleaned_mesh.visual.material = final_material
+
+            cleaned_mesh.export(final_glb_path, file_type='glb')
 
         return (final_glb_path,)
