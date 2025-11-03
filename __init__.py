@@ -1,6 +1,6 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, SmoothByAngle, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
+from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
 from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake
 
 
@@ -28,7 +28,6 @@ NODE_CLASS_MAPPINGS = {
     "ProcessMesh": ProcessMesh,
     "MirrorMesh": MirrorMesh,
     "SubdivisionMesh": SubdivisionMesh,
-    "SmoothByAngle": SmoothByAngle,
     "Pyremesh": Pyremesh,
     "O3DRemesh": O3DRemesh,
     "InstantMeshes": InstantMeshes,
@@ -60,7 +59,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ProcessMesh": "Process Mesh",
     "MirrorMesh": "Mirror Mesh",
     "SubdivisionMesh": "Subdivision Surface",
-    "SmoothByAngle": "Smooth By Angle",
     "Pyremesh": "Pyremesher",
     "O3DRemesh": "Open3D Remesh",
     "InstantMeshes": "Instant Meshes (Quad Remesher)",

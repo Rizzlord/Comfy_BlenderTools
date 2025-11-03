@@ -771,12 +771,18 @@ try:
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    if p['recalculate_normals']:
-        angle_value = radians(float(p['smooth_angle']))
-        try:
-            bpy.ops.object.shade_smooth_by_angle(angle=angle_value, keep_sharp_edges=True)
-        except TypeError:
-            bpy.ops.object.shade_smooth_by_angle(angle=float(p['smooth_angle']), keep_sharp_edges=True)
+    angle_value = radians(float(p['smooth_angle']))
+    active_obj = bpy.context.view_layer.objects.active
+    if active_obj and active_obj.type == 'MESH':
+        data = active_obj.data
+        if hasattr(data, "use_auto_smooth"):
+            data.use_auto_smooth = True
+        if hasattr(data, "auto_smooth_angle"):
+            data.auto_smooth_angle = angle_value
+    try:
+        bpy.ops.object.shade_smooth_by_angle(angle=angle_value, keep_sharp_edges=True)
+    except TypeError:
+        bpy.ops.object.shade_smooth_by_angle(angle=float(p['smooth_angle']), keep_sharp_edges=True)
 
     bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
     sys.exit(0)
@@ -1133,142 +1139,6 @@ class QuadriflowSettings:
     CATEGORY = "Comfy_BlenderTools/Utils/Settings"
     def get_settings(self, **kwargs): return (kwargs,)
     
-class SmoothByAngle:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "trimesh": ("TRIMESH",),
-                "angle": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 180.0, "step": 1.0}),
-                "merge_distance": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.1, "step": 0.0001}),
-            }
-        }
-
-    RETURN_TYPES = ("TRIMESH",)
-    FUNCTION = "apply_smooth"
-    CATEGORY = "Comfy_BlenderTools/Utils"
-
-    def apply_smooth(self, trimesh, angle, merge_distance):
-        import tempfile
-        import os
-        import trimesh as trimesh_loader
-        from .utils import _run_blender_script
-        original_material = None
-        original_uv = None
-        if hasattr(trimesh, 'visual'):
-            if hasattr(trimesh.visual, 'material') and trimesh.visual.material is not None:
-                original_material = trimesh.visual.material.copy() if hasattr(trimesh.visual.material, 'copy') else trimesh.visual.material
-            if hasattr(trimesh.visual, 'uv') and trimesh.visual.uv is not None:
-                original_uv = np.array(trimesh.visual.uv, copy=True)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_mesh_path = os.path.join(temp_dir, "input.glb")
-            output_mesh_path = os.path.join(temp_dir, "output.glb")
-            script_path = os.path.join(temp_dir, "script.py")
-
-            trimesh.export(input_mesh_path)
-
-            params = {
-                'angle': angle,
-                'merge_distance': merge_distance,
-                'input_mesh': input_mesh_path,
-                'output_mesh': output_mesh_path,
-            }
-
-            script = """
-import bpy
-import bmesh
-from math import radians
-
-p = """ + str(params) + """
-
-def merge_preserve_uv(mesh_obj, distance):
-    if distance <= 0.0:
-        return
-    bm = bmesh.from_edit_mesh(mesh_obj.data)
-    uv_layer = bm.loops.layers.uv.active
-    if uv_layer:
-        verts_to_merge = []
-        for v in bm.verts:
-            if not v.link_loops:
-                verts_to_merge.append(v)
-                continue
-            uv_coords = {
-                (round(loop[uv_layer].uv.x, 6), round(loop[uv_layer].uv.y, 6))
-                for loop in v.link_loops
-            }
-            if len(uv_coords) <= 1:
-                verts_to_merge.append(v)
-    else:
-        verts_to_merge = list(bm.verts)
-    if verts_to_merge:
-        bmesh.ops.remove_doubles(bm, verts=verts_to_merge, dist=distance)
-        bmesh.update_edit_mesh(mesh_obj.data)
-    bm.free()
-
-bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
-
-obj = bpy.context.active_object
-if not obj or obj.type != 'MESH':
-    obj = next(o for o in bpy.context.scene.objects if o.type == 'MESH')
-
-bpy.context.view_layer.objects.active = obj
-obj.select_set(True)
-
-bpy.ops.object.mode_set(mode='EDIT')
-merge_preserve_uv(obj, float(p['merge_distance']))
-
-# Reset Normals
-bpy.ops.mesh.select_all(action='SELECT')
-if obj.data.has_custom_normals:
-    bpy.ops.mesh.customdata_custom_splitnormals_clear()
-bpy.ops.mesh.normals_make_consistent(inside=False)
-bpy.ops.object.mode_set(mode='OBJECT')
-
-# Smooth by Angle
-bpy.ops.object.shade_smooth_by_angle(angle=radians(p['angle']), keep_sharp_edges=True)
-
-bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB')
-
-"""
-
-            with open(script_path, 'w') as f:
-                f.write(script)
-
-            _run_blender_script(script_path)
-
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
-            visuals = getattr(processed_mesh, "visual", None)
-            blender_uv = getattr(visuals, "uv", None) if visuals is not None else None
-            blender_material = getattr(visuals, "material", None) if visuals is not None else None
-
-            uv_data = blender_uv
-            if uv_data is None and original_uv is not None and original_uv.shape[0] == processed_mesh.vertices.shape[0]:
-                uv_data = original_uv
-
-            material = blender_material if blender_material is not None else original_material
-
-            if visuals is None or not hasattr(visuals, "uv"):
-                if uv_data is not None or material is not None:
-                    processed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
-                        uv=uv_data,
-                        material=material
-                    )
-            else:
-                if uv_data is not None:
-                    processed_mesh.visual.uv = uv_data
-                if material is not None:
-                    processed_mesh.visual.material = material
-
-            try:
-                processed_normals = np.array(processed_mesh.vertex_normals, copy=True)
-                processed_mesh.vertex_normals = processed_normals
-            except Exception:
-                pass
-
-            return (processed_mesh,)
-
 class Pyremesh:
     """
     A ComfyUI node for adaptive mesh simplification and remeshing using PyMeshLab.
