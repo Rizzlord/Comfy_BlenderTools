@@ -45,9 +45,7 @@ def clean_mesh(obj, merge_distance):
     if merge_distance > 0.0:
         bpy.ops.mesh.remove_doubles(threshold=merge_distance)
 
-    bpy.ops.mesh.customdata_custom_splitnormals_clear()
     bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.shade_smooth()
 """
 
 def get_mof_path():
@@ -194,7 +192,7 @@ except Exception as e:
             
             _run_blender_script(script_path)
             
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
             return (processed_mesh,)
 
 class VoxelSettings:
@@ -520,9 +518,25 @@ except Exception as e:
 
             _run_blender_script(script_path)
 
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
-            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
-                processed_mesh.visual.material = trimesh.visual.material
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+            if original_uv is not None or original_material is not None:
+                visuals = getattr(processed_mesh, "visual", None)
+                material = original_material if original_material is not None else getattr(visuals, "material", None)
+                uv_data = original_uv if original_uv is not None else getattr(visuals, "uv", None)
+                image_data = getattr(visuals, "image", None)
+                if visuals is None or (uv_data is not None and not hasattr(visuals, "uv")):
+                    processed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+                        uv=uv_data,
+                        image=image_data,
+                        material=material
+                    )
+                else:
+                    if uv_data is not None:
+                        processed_mesh.visual.uv = uv_data
+                    if image_data is not None and hasattr(processed_mesh.visual, "image"):
+                        processed_mesh.visual.image = image_data
+                    if material is not None:
+                        processed_mesh.visual.material = material
 
             return (processed_mesh,)
 
@@ -606,10 +620,28 @@ except Exception as e:
 
             _run_blender_script(script_path)
 
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
-            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
-                processed_mesh.visual.material = trimesh.visual.material
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+            visuals = getattr(processed_mesh, "visual", None)
+            blender_uv = getattr(visuals, "uv", None) if visuals is not None else None
+            blender_material = getattr(visuals, "material", None) if visuals is not None else None
 
+            uv_data = blender_uv
+            if uv_data is None and original_uv is not None and original_uv.shape[0] == processed_mesh.vertices.shape[0]:
+                uv_data = original_uv
+
+            material = blender_material if blender_material is not None else original_material
+
+            if visuals is None or not hasattr(visuals, "uv"):
+                if uv_data is not None or material is not None:
+                    processed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+                        uv=uv_data,
+                        material=material
+                    )
+            else:
+                if uv_data is not None:
+                    processed_mesh.visual.uv = uv_data
+                if material is not None:
+                    processed_mesh.visual.material = material
             return (processed_mesh,)
 
 class ProcessMesh:
@@ -622,6 +654,7 @@ class ProcessMesh:
                 "keep_biggest": ("BOOLEAN", {"default": True}),
                 "fill_holes": ("BOOLEAN", {"default": True}),
                 "recalculate_normals": ("BOOLEAN", {"default": True}),
+                "smooth_angle": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 180.0, "step": 1.0}),
             }
         }
 
@@ -629,7 +662,14 @@ class ProcessMesh:
     FUNCTION = "process"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def process(self, trimesh, merge_distance, keep_biggest, fill_holes, recalculate_normals):
+    def process(self, trimesh, merge_distance, keep_biggest, fill_holes, recalculate_normals, smooth_angle):
+        original_material = None
+        original_uv = None
+        if hasattr(trimesh, 'visual'):
+            if hasattr(trimesh.visual, 'material') and trimesh.visual.material is not None:
+                original_material = trimesh.visual.material.copy() if hasattr(trimesh.visual.material, 'copy') else trimesh.visual.material
+            if hasattr(trimesh.visual, 'uv') and trimesh.visual.uv is not None:
+                original_uv = np.array(trimesh.visual.uv, copy=True)
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
@@ -642,31 +682,59 @@ class ProcessMesh:
                 'keep_biggest': keep_biggest,
                 'fill_holes': fill_holes,
                 'recalculate_normals': recalculate_normals,
+                'smooth_angle': smooth_angle,
             }
-            script_params = {k: repr(v) for k, v in params.items()}
-            script_params['input_mesh'] = repr(input_mesh_path)
-            script_params['output_mesh'] = repr(output_mesh_path)
+            params['input_mesh'] = input_mesh_path
+            params['output_mesh'] = output_mesh_path
+            script = """
+import bpy
+import bmesh
+import sys
+import traceback
+from math import radians
 
-            script = f"""
-import bpy, sys, os, traceback
-p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+p = """ + str(params) + """
+
+def merge_preserve_uv(mesh_obj, distance):
+    if distance <= 0.0:
+        return
+    bm = bmesh.from_edit_mesh(mesh_obj.data)
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer:
+        verts_to_merge = []
+        for v in bm.verts:
+            if not v.link_loops:
+                verts_to_merge.append(v)
+                continue
+            uv_coords = {
+                (round(loop[uv_layer].uv.x, 6), round(loop[uv_layer].uv.y, 6))
+                for loop in v.link_loops
+            }
+            if len(uv_coords) <= 1:
+                verts_to_merge.append(v)
+    else:
+        verts_to_merge = list(bm.verts)
+    if verts_to_merge:
+        bmesh.ops.remove_doubles(bm, verts=verts_to_merge, dist=distance)
+        bmesh.update_edit_mesh(mesh_obj.data)
+    bm.free()
 
 try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
-    
+
     obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
     if not obj:
         raise Exception("No mesh found in the imported GLB file.")
 
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
-    
+
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
 
-    if p['merge_distance'] > 0.0:
-        bpy.ops.mesh.remove_doubles(threshold=p['merge_distance'])
+    merge_preserve_uv(obj, float(p['merge_distance']))
+    bpy.ops.mesh.select_all(action='SELECT')
 
     if p['recalculate_normals']:
         bpy.ops.mesh.normals_make_consistent(inside=False)
@@ -674,16 +742,16 @@ try:
     if p['keep_biggest']:
         bpy.ops.mesh.separate(type='LOOSE')
         bpy.ops.object.mode_set(mode='OBJECT')
-        
+
         mesh_objects = [o for o in bpy.context.selected_objects if o.type == 'MESH' and o.data]
 
         if len(mesh_objects) > 1:
             biggest = max(mesh_objects, key=lambda o: len(o.data.vertices))
-            
-            for o in mesh_objects:
-                if o != biggest:
-                    bpy.data.objects.remove(o, do_unlink=True)
-            
+
+            for other in mesh_objects:
+                if other != biggest:
+                    bpy.data.objects.remove(other, do_unlink=True)
+
             bpy.ops.object.select_all(action='DESELECT')
             bpy.context.view_layer.objects.active = biggest
             biggest.select_set(True)
@@ -694,12 +762,26 @@ try:
     if p['fill_holes']:
         bpy.ops.mesh.fill_holes(sides=0)
 
+    merge_preserve_uv(bpy.context.view_layer.objects.active, float(p['merge_distance']))
+
+    if p['recalculate_normals']:
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        bpy.ops.mesh.mark_sharp(clear=True)
+        bpy.ops.mesh.normals_make_consistent(inside=False)
+
     bpy.ops.object.mode_set(mode='OBJECT')
+
+    if p['recalculate_normals']:
+        angle_value = radians(float(p['smooth_angle']))
+        try:
+            bpy.ops.object.shade_smooth_by_angle(angle=angle_value, keep_sharp_edges=True)
+        except TypeError:
+            bpy.ops.object.shade_smooth_by_angle(angle=float(p['smooth_angle']), keep_sharp_edges=True)
 
     bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
     sys.exit(0)
 except Exception as e:
-    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    print(f"Blender script failed: {e}", file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 """
@@ -708,9 +790,35 @@ except Exception as e:
 
             _run_blender_script(script_path)
 
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
-            if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
-                processed_mesh.visual.material = trimesh.visual.material
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+
+            visuals = getattr(processed_mesh, "visual", None)
+            blender_uv = getattr(visuals, "uv", None) if visuals is not None else None
+            blender_material = getattr(visuals, "material", None) if visuals is not None else None
+
+            uv_data = blender_uv
+            if uv_data is None and original_uv is not None and original_uv.shape[0] == processed_mesh.vertices.shape[0]:
+                uv_data = original_uv
+
+            material = blender_material if blender_material is not None else original_material
+
+            if visuals is None or not hasattr(visuals, "uv"):
+                if uv_data is not None or material is not None:
+                    processed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+                        uv=uv_data,
+                        material=material
+                    )
+            else:
+                if uv_data is not None:
+                    processed_mesh.visual.uv = uv_data
+                if material is not None:
+                    processed_mesh.visual.material = material
+
+            try:
+                processed_normals = np.array(processed_mesh.vertex_normals, copy=True)
+                processed_mesh.vertex_normals = processed_normals
+            except Exception:
+                pass
 
             return (processed_mesh,)
 
@@ -1045,6 +1153,13 @@ class SmoothByAngle:
         import os
         import trimesh as trimesh_loader
         from .utils import _run_blender_script
+        original_material = None
+        original_uv = None
+        if hasattr(trimesh, 'visual'):
+            if hasattr(trimesh.visual, 'material') and trimesh.visual.material is not None:
+                original_material = trimesh.visual.material.copy() if hasattr(trimesh.visual.material, 'copy') else trimesh.visual.material
+            if hasattr(trimesh.visual, 'uv') and trimesh.visual.uv is not None:
+                original_uv = np.array(trimesh.visual.uv, copy=True)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "input.glb")
@@ -1067,6 +1182,30 @@ from math import radians
 
 p = """ + str(params) + """
 
+def merge_preserve_uv(mesh_obj, distance):
+    if distance <= 0.0:
+        return
+    bm = bmesh.from_edit_mesh(mesh_obj.data)
+    uv_layer = bm.loops.layers.uv.active
+    if uv_layer:
+        verts_to_merge = []
+        for v in bm.verts:
+            if not v.link_loops:
+                verts_to_merge.append(v)
+                continue
+            uv_coords = {
+                (round(loop[uv_layer].uv.x, 6), round(loop[uv_layer].uv.y, 6))
+                for loop in v.link_loops
+            }
+            if len(uv_coords) <= 1:
+                verts_to_merge.append(v)
+    else:
+        verts_to_merge = list(bm.verts)
+    if verts_to_merge:
+        bmesh.ops.remove_doubles(bm, verts=verts_to_merge, dist=distance)
+        bmesh.update_edit_mesh(mesh_obj.data)
+    bm.free()
+
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
 
@@ -1077,15 +1216,10 @@ if not obj or obj.type != 'MESH':
 bpy.context.view_layer.objects.active = obj
 obj.select_set(True)
 
-# Merge by Distance
 bpy.ops.object.mode_set(mode='EDIT')
-bm = bmesh.from_edit_mesh(obj.data)
-original_verts = len(bm.verts)
-bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=p['merge_distance'])
-bmesh.update_edit_mesh(obj.data)
-bm.free()
+merge_preserve_uv(obj, float(p['merge_distance']))
 
-# Reset Vectors (Clear custom normals and recalculate)
+# Reset Normals
 bpy.ops.mesh.select_all(action='SELECT')
 if obj.data.has_custom_normals:
     bpy.ops.mesh.customdata_custom_splitnormals_clear()
@@ -1093,7 +1227,7 @@ bpy.ops.mesh.normals_make_consistent(inside=False)
 bpy.ops.object.mode_set(mode='OBJECT')
 
 # Smooth by Angle
-bpy.ops.object.shade_smooth_by_angle(angle=radians(p['angle']))
+bpy.ops.object.shade_smooth_by_angle(angle=radians(p['angle']), keep_sharp_edges=True)
 
 bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB')
 
@@ -1104,7 +1238,34 @@ bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB')
 
             _run_blender_script(script_path)
 
-            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh")
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+            visuals = getattr(processed_mesh, "visual", None)
+            blender_uv = getattr(visuals, "uv", None) if visuals is not None else None
+            blender_material = getattr(visuals, "material", None) if visuals is not None else None
+
+            uv_data = blender_uv
+            if uv_data is None and original_uv is not None and original_uv.shape[0] == processed_mesh.vertices.shape[0]:
+                uv_data = original_uv
+
+            material = blender_material if blender_material is not None else original_material
+
+            if visuals is None or not hasattr(visuals, "uv"):
+                if uv_data is not None or material is not None:
+                    processed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+                        uv=uv_data,
+                        material=material
+                    )
+            else:
+                if uv_data is not None:
+                    processed_mesh.visual.uv = uv_data
+                if material is not None:
+                    processed_mesh.visual.material = material
+
+            try:
+                processed_normals = np.array(processed_mesh.vertex_normals, copy=True)
+                processed_mesh.vertex_normals = processed_normals
+            except Exception:
+                pass
 
             return (processed_mesh,)
 

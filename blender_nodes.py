@@ -575,11 +575,16 @@ class BlenderExportGLB:
 
         original_material = None
         original_uv = None
+        original_normals = None
         if hasattr(trimesh, 'visual'):
             if hasattr(trimesh.visual, 'material') and trimesh.visual.material is not None:
                 original_material = trimesh.visual.material.copy()
             if hasattr(trimesh.visual, 'uv') and trimesh.visual.uv is not None:
                 original_uv = np.array(trimesh.visual.uv, copy=True)
+        try:
+            original_normals = np.array(trimesh.vertex_normals, copy=True)
+        except Exception:
+            original_normals = None
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_glb_path = os.path.join(temp_dir, "temp.glb")
@@ -622,7 +627,10 @@ except Exception as e:
             if not os.path.exists(cleaned_glb_path):
                 raise FileNotFoundError(f"Blender did not produce cleaned GLB at {cleaned_glb_path}")
 
-            cleaned_mesh = trimesh_loader.load(cleaned_glb_path, force="mesh")
+            cleaned_mesh = trimesh_loader.load(cleaned_glb_path, force="mesh", process=False)
+            blender_normals = getattr(cleaned_mesh, "_vertex_normals", None)
+            if blender_normals is not None:
+                blender_normals = np.array(blender_normals, copy=True)
 
             final_material = None
             if original_material is not None:
@@ -631,13 +639,28 @@ except Exception as e:
                 final_material = cleaned_mesh.visual.material
 
             uv_data = cleaned_mesh.visual.uv if hasattr(cleaned_mesh.visual, 'uv') else None
-            if uv_data is None and original_uv is not None:
+            if uv_data is None and original_uv is not None and original_uv.shape[0] == cleaned_mesh.vertices.shape[0]:
                 uv_data = original_uv
 
             if final_material is not None and uv_data is not None:
                 cleaned_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=uv_data, material=final_material)
             elif final_material is not None:
                 cleaned_mesh.visual.material = final_material
+
+            normals_to_apply = None
+            if blender_normals is not None:
+                normals_to_apply = blender_normals
+            elif original_normals is not None and original_normals.shape[0] == cleaned_mesh.vertices.shape[0]:
+                normals_to_apply = original_normals
+
+            if normals_to_apply is not None:
+                cleaned_mesh.vertex_normals = normals_to_apply
+            else:
+                try:
+                    computed_normals = np.array(cleaned_mesh.vertex_normals, copy=True)
+                    cleaned_mesh.vertex_normals = computed_normals
+                except Exception:
+                    pass
 
             cleaned_mesh.export(final_glb_path, file_type='glb')
 
