@@ -200,6 +200,48 @@ trimesh (TRIMESH): The textured mesh object.
 
 glb_path (STRING): The path to the exported GLB file.
 
+Comfy_BlenderTools/Vertex Bake
+Multiview Texture Bake
+Projects multiview renders directly into vertex colors and immediately bakes them onto the mesh's UVs, producing a texture map without needing a separate high-to-low bake step. Requires a UV unwrapped mesh and a consistent multiview camera configuration.
+
+Category: Vertex Bake
+
+Function: bake
+
+Inputs:
+
+mesh (TRIMESH): The UV-unwrapped mesh that will receive the texture.
+
+multiview_images (IMAGE): Batch of multiview images to project.
+
+projection_mode (ENUM): orthographic or perspective projection used for the multiview cameras. Default: orthographic
+
+texture_resolution (ENUM): Output texture size. Options: 512, 1024, 2048, 4096, 8192. Default: 2048
+
+margin (INT): Pixel padding when baking. Default: 16 (Min: 0, Max: 4096)
+
+use_gpu (BOOLEAN): Use GPU for the Blender bake if available. Default: True
+
+use_seqtex_mv (BOOLEAN): When True, ignores the HY3DCAMERA input and recreates the SeqTex Step 1 camera rig (y2z workflow, 4 evenly spaced views, elevation 0°, 50mm lens, 36mm sensor) so SeqTex multiview renders line up automatically.
+
+seqtex_rotation_offset (FLOAT, optional): Extra azimuth offset (in degrees) applied when use_seqtex_mv is enabled—use this to rotate the automatically generated rig if front/back end up on the sides.
+
+seqtex_include_poles (BOOLEAN, optional): Adds dedicated top and bottom views when use_seqtex_mv is enabled. Only turn this on if your SeqTex multiview batch actually contains the matching extra renders (at least 6 images total); otherwise the projections will be misaligned.
+
+blend_sharpness / angle_cutoff / perspective_fov / orthographic_width / orthographic_height / perspective_width / perspective_height (FLOAT): Controls multiview projection behavior (same as the Project Vertex Color node).
+
+brightness (FLOAT): Post-bake brightness multiplier. Default: 1.0 (Min: 0.0, Max: 2.0)
+
+contrast (FLOAT): Post-bake contrast adjustment. Default: 1.0 (Min: 0.0, Max: 4.0)
+
+camera_config (HY3DCAMERA, optional): Custom camera layout that matches the multiview images.
+
+Outputs:
+
+mesh_with_vertex_colors (TRIMESH): Mesh containing the aggregated vertex colors used for the bake.
+
+color_map (IMAGE): The baked UV texture as a torch tensor image.
+
 Comfy_BlenderTools/Rendering & Export
 Render Depth Map (Blender)
 Renders a depth map of a 3D mesh from a specified camera perspective using Blender's Cycles renderer. Supports single or multi-view rendering.

@@ -1,7 +1,7 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
-from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake
+from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake, MultiviewTextureBake
 
 
 NODE_CLASS_MAPPINGS = {
@@ -24,6 +24,7 @@ NODE_CLASS_MAPPINGS = {
     "SmoothMesh": SmoothMesh,
     "VertexToHighPoly": VertexToHighPoly,
     "MultiviewDisplaceMesh": MultiviewDisplaceMesh,
+    "MultiviewTextureBake": MultiviewTextureBake,
     "VertexColorBake": VertexColorBake,
     "ProcessMesh": ProcessMesh,
     "MirrorMesh": MirrorMesh,
@@ -55,6 +56,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SmoothMesh": "Smooth Mesh",
     "VertexToHighPoly": "Project Vertex Color (High Poly)",
     "MultiviewDisplaceMesh": "Displace Mesh (Multiview)",
+    "MultiviewTextureBake": "Bake Multiview Texture",
     "VertexColorBake": "Bake Vertex Color",
     "ProcessMesh": "Process Mesh",
     "MirrorMesh": "Mirror Mesh",

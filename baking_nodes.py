@@ -753,8 +753,8 @@ class LoadMultiviewImages:
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
+    RETURN_TYPES = ("IMAGE", "IMAGE")
+    RETURN_NAMES = ("images", "masks")
     FUNCTION = "load"
     CATEGORY = "Comfy_BlenderTools"
 
@@ -770,12 +770,71 @@ class LoadMultiviewImages:
         if not image_files:
             raise FileNotFoundError(f"No multiview images (MV_*.png) found in {path}")
 
+        def _build_mask_map():
+            mask_files = [
+                f for f in os.listdir(path)
+                if f.lower().endswith(".png") and (f.lower().startswith("mv_mask_") or f.lower().startswith("mask_"))
+            ]
+            mask_map = {}
+            for fname in mask_files:
+                stem = os.path.splitext(fname)[0]
+                parts = stem.split('_')
+                if not parts:
+                    continue
+                idx_str = parts[-1]
+                try:
+                    idx = int(idx_str)
+                except ValueError:
+                    continue
+                mask_map[idx] = os.path.join(path, fname)
+            return mask_map
+
+        mask_map = _build_mask_map()
+
         images = []
+        masks = []
+
+        def _as_rgb_mask(mask_np):
+            if mask_np.ndim == 3 and mask_np.shape[2] == 3:
+                return mask_np.astype(np.float32)
+            rgb = np.zeros((*mask_np.shape[:2], 3), dtype=np.float32)
+            rgb[..., 1] = mask_np.astype(np.float32)
+            return rgb
+
         for file_name in image_files:
             img_path = os.path.join(path, file_name)
-            img = Image.open(img_path).convert("RGB")
-            img_np = np.array(img).astype(np.float32) / 255.0
+            raw_img = Image.open(img_path)
+            alpha_channel = None
+            if 'A' in raw_img.getbands():
+                alpha_channel = np.array(raw_img.getchannel('A')).astype(np.float32) / 255.0
+            img_rgb = raw_img.convert("RGB")
+            img_np = np.array(img_rgb).astype(np.float32) / 255.0
             img_tensor = torch.from_numpy(img_np)
             images.append(img_tensor)
-        
-        return (torch.stack(images),)
+
+            idx = int(file_name.split('_')[1].split('.')[0])
+            mask_tensor = None
+
+            mask_path = mask_map.get(idx)
+            if mask_path:
+                mask_img = Image.open(mask_path)
+                if mask_img.mode != 'L':
+                    mask_img = mask_img.convert('L')
+                if mask_img.size != img_rgb.size:
+                    mask_img = mask_img.resize(img_rgb.size, Image.NEAREST)
+                mask_np = np.array(mask_img).astype(np.float32) / 255.0
+                mask_rgb = _as_rgb_mask(mask_np)
+                mask_tensor = torch.from_numpy(mask_rgb)
+            elif alpha_channel is not None:
+                mask_rgb = _as_rgb_mask(alpha_channel)
+                mask_tensor = torch.from_numpy(mask_rgb)
+            else:
+                default_mask = np.ones(img_tensor.shape[:2], dtype=np.float32)
+                mask_rgb = _as_rgb_mask(default_mask)
+                mask_tensor = torch.from_numpy(mask_rgb)
+
+            masks.append(mask_tensor)
+
+        images_tensor = torch.stack(images)
+        masks_tensor = torch.stack(masks)
+        return (images_tensor, masks_tensor)
