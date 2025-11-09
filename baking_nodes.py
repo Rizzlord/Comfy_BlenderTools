@@ -753,7 +753,7 @@ class LoadMultiviewImages:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE")
+    RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("images", "masks")
     FUNCTION = "load"
     CATEGORY = "Comfy_BlenderTools"
@@ -794,13 +794,6 @@ class LoadMultiviewImages:
         images = []
         masks = []
 
-        def _as_rgb_mask(mask_np):
-            if mask_np.ndim == 3 and mask_np.shape[2] == 3:
-                return mask_np.astype(np.float32)
-            rgb = np.zeros((*mask_np.shape[:2], 3), dtype=np.float32)
-            rgb[..., 1] = mask_np.astype(np.float32)
-            return rgb
-
         for file_name in image_files:
             img_path = os.path.join(path, file_name)
             raw_img = Image.open(img_path)
@@ -823,15 +816,12 @@ class LoadMultiviewImages:
                 if mask_img.size != img_rgb.size:
                     mask_img = mask_img.resize(img_rgb.size, Image.NEAREST)
                 mask_np = np.array(mask_img).astype(np.float32) / 255.0
-                mask_rgb = _as_rgb_mask(mask_np)
-                mask_tensor = torch.from_numpy(mask_rgb)
+                mask_tensor = torch.from_numpy(mask_np)
             elif alpha_channel is not None:
-                mask_rgb = _as_rgb_mask(alpha_channel)
-                mask_tensor = torch.from_numpy(mask_rgb)
+                mask_tensor = torch.from_numpy(alpha_channel.astype(np.float32))
             else:
                 default_mask = np.ones(img_tensor.shape[:2], dtype=np.float32)
-                mask_rgb = _as_rgb_mask(default_mask)
-                mask_tensor = torch.from_numpy(mask_rgb)
+                mask_tensor = torch.from_numpy(default_mask)
 
             masks.append(mask_tensor)
 

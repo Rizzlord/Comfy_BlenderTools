@@ -369,7 +369,7 @@ class VertexToHighPoly:
             },
             "optional": {
                 "camera_config": ("HY3DCAMERA",),
-                "multiview_masks": ("IMAGE",),
+                "multiview_masks": ("MASK",),
             }
         }
 
@@ -592,7 +592,7 @@ class MultiviewTextureBake:
                 "camera_config": ("HY3DCAMERA",),
                 "seqtex_rotation_offset": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
                 "seqtex_include_poles": ("BOOLEAN", {"default": False}),
-                "multiview_masks": ("IMAGE",),
+                "multiview_masks": ("MASK",),
             }
         }
 
