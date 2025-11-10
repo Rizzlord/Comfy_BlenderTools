@@ -1,7 +1,7 @@
 from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
-from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake, MultiviewTextureBake, AutoBakeTextureFromMV, SeqTexCam, BakeToModel
+from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake, MultiviewTextureBake, AutoBakeTextureFromMV, SeqTexCam, BakeToModel, SeqTexProjectTexture
 
 
 NODE_CLASS_MAPPINGS = {
@@ -28,6 +28,7 @@ NODE_CLASS_MAPPINGS = {
     "AutoBakeTextureFromMV": AutoBakeTextureFromMV,
     "SeqTexCam": SeqTexCam,
     "BakeToModel": BakeToModel,
+    "SeqTexProjectTexture": SeqTexProjectTexture,
     "VertexColorBake": VertexColorBake,
     "ProcessMesh": ProcessMesh,
     "MirrorMesh": MirrorMesh,
@@ -63,6 +64,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AutoBakeTextureFromMV": "Auto Bake Texture (Multiview)",
     "SeqTexCam": "SeqTex Cam",
     "BakeToModel": "Bake To Model",
+    "SeqTexProjectTexture": "SeqTex Project Texture",
     "VertexColorBake": "Bake Vertex Color",
     "ProcessMesh": "Process Mesh",
     "MirrorMesh": "Mirror Mesh",

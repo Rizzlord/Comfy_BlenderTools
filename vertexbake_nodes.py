@@ -2272,6 +2272,104 @@ class BakeToModel:
         color_map = torch.from_numpy(texture_rgba[:, :, :3].astype(np.float32) / 255.0).unsqueeze(0)
         return (mesh_result, color_map)
 
+class SeqTexProjectTexture:
+    RESOLUTIONS = ["512", "1024", "2048", "4096", "8192"]
+    PRESETS = SEQ_TEX_VIEW_PRESETS.copy()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mesh": ("TRIMESH",),
+                "multiview_images": ("IMAGE",),
+                "seqtex_view_preset": (cls.PRESETS, {"default": "6"}),
+                "texture_resolution": (cls.RESOLUTIONS, {"default": "2048"}),
+                "margin": ("INT", {"default": 16, "min": 0, "max": 4096}),
+                "mvp_matrix_path": ("STRING", {"default": ""}),
+                "w2c_matrix_path": ("STRING", {"default": ""}),
+                "blend_angle_start": ("FLOAT", {"default": 40.0, "min": 0.0, "max": 85.0, "step": 0.5}),
+                "blend_angle_end": ("FLOAT", {"default": 60.0, "min": 0.0, "max": 120.0, "step": 0.5}),
+                "flip_images": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "mask_images_path": ("STRING", {"default": ""}),
+                "multiview_masks": ("MASK",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("color_map",)
+    FUNCTION = "project_texture"
+    CATEGORY = "Comfy_BlenderTools/VertexBake"
+
+    def project_texture(
+        self,
+        mesh,
+        multiview_images,
+        seqtex_view_preset,
+        texture_resolution,
+        margin,
+        mvp_matrix_path,
+        w2c_matrix_path,
+        blend_angle_start,
+        blend_angle_end,
+        flip_images,
+        mask_images_path="",
+        multiview_masks=None,
+    ):
+        if blend_angle_end <= blend_angle_start:
+            raise ValueError("blend_angle_end must be greater than blend_angle_start.")
+        if not isinstance(multiview_images, torch.Tensor) or multiview_images.ndim != 4:
+            raise ValueError("multiview_images must be a 4D IMAGE tensor (batch, height, width, channels).")
+
+        preset_indices = _resolve_seqtex_view_indices(seqtex_view_preset, multiview_images.shape[0])
+        images_selected = _slice_tensor_first_dim(multiview_images, preset_indices, "Multiview images").contiguous()
+        masks_tensor = None
+
+        if multiview_masks is not None:
+            if not isinstance(multiview_masks, torch.Tensor) or multiview_masks.ndim < 3:
+                raise ValueError("multiview_masks must be shaped (N, H, W) or (N, H, W, 1).")
+            masks_tensor = _slice_tensor_first_dim(multiview_masks, preset_indices, "Multiview masks").contiguous()
+            if masks_tensor.ndim == 4 and masks_tensor.shape[-1] == 1:
+                masks_tensor = masks_tensor[..., 0]
+        elif mask_images_path and mask_images_path.strip():
+            loaded_masks = _load_seqtex_tensor(mask_images_path, "Mask tensor")
+            if loaded_masks.ndim not in (3, 4):
+                raise ValueError("Mask tensor must be 3D or 4D.")
+            masks_tensor = _slice_tensor_first_dim(loaded_masks, preset_indices, "Mask tensor").contiguous()
+            if masks_tensor.ndim == 4 and masks_tensor.shape[-1] == 1:
+                masks_tensor = masks_tensor[..., 0]
+
+        mvp_tensor = _load_seqtex_tensor(mvp_matrix_path, "MVP matrix")
+        w2c_tensor = _load_seqtex_tensor(w2c_matrix_path, "World-to-camera matrix")
+        mvp_tensor = _slice_tensor_first_dim(mvp_tensor, preset_indices, "MVP tensor")
+        w2c_tensor = _slice_tensor_first_dim(w2c_tensor, preset_indices, "W2C tensor")
+
+        tex_res = int(texture_resolution)
+        if tex_res <= 0:
+            raise ValueError("texture_resolution must be positive.")
+
+        images_selected = torch.clamp(images_selected, 0.0, 1.0)
+        if flip_images:
+            images_selected = torch.flip(images_selected, dims=[1])
+        if masks_tensor is not None:
+            masks_tensor = torch.clamp(masks_tensor, 0.0, 1.0)
+
+        texture_rgba = _project_seqtex_multiview_texture(
+            mesh,
+            images_selected,
+            masks_tensor,
+            mvp_tensor,
+            w2c_tensor,
+            tex_res,
+            int(margin),
+            float(blend_angle_start),
+            float(blend_angle_end),
+        )
+
+        color_map = torch.from_numpy(texture_rgba[:, :, :3].astype(np.float32) / 255.0).unsqueeze(0)
+        return (color_map,)
+
     def _bake_vertex_colors_to_texture(self, mesh, resolution, margin, use_gpu):
         dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
