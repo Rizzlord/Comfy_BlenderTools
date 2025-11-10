@@ -6,6 +6,7 @@ import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
 import torch
+import re
 from PIL import Image, ImageFilter
 from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
@@ -762,29 +763,46 @@ class LoadMultiviewImages:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path does not exist: {path}")
 
-        image_files = sorted(
-            [f for f in os.listdir(path) if f.startswith("MV_") and f.endswith(".png")],
-            key=lambda x: int(x.split('_')[1].split('.')[0])
-        )
+        def _extract_index(file_name):
+            stem = os.path.splitext(file_name)[0]
+            match = re.search(r'(\d+)(?:_*)$', stem)
+            if not match:
+                return None
+            return int(match.group(1))
 
-        if not image_files:
-            raise FileNotFoundError(f"No multiview images (MV_*.png) found in {path}")
+        image_entries = []
+        for fname in os.listdir(path):
+            if not fname.lower().endswith(".png"):
+                continue
+            if 'mask' in os.path.splitext(fname)[0].lower():
+                continue
+            idx = _extract_index(fname)
+            if idx is None:
+                continue
+            image_entries.append((idx, fname))
+
+        if not image_entries:
+            raise FileNotFoundError(
+                f"No numbered multiview images found in {path}. "
+                "Name files with a trailing number like 'front_1.png'..'side_12.png'."
+            )
+
+        image_entries.sort(key=lambda item: item[0])
+
+        available_indices = {idx for idx, _ in image_entries}
+        if not available_indices:
+            raise FileNotFoundError(f"No multiview images with numeric suffixes found in {path}")
 
         def _build_mask_map():
-            mask_files = [
-                f for f in os.listdir(path)
-                if f.lower().endswith(".png") and (f.lower().startswith("mv_mask_") or f.lower().startswith("mask_"))
-            ]
             mask_map = {}
-            for fname in mask_files:
-                stem = os.path.splitext(fname)[0]
-                parts = stem.split('_')
-                if not parts:
+            for fname in os.listdir(path):
+                if not fname.lower().endswith(".png"):
                     continue
-                idx_str = parts[-1]
-                try:
-                    idx = int(idx_str)
-                except ValueError:
+                stem_lower = os.path.splitext(fname)[0].lower()
+                if 'mask' not in stem_lower:
+                    continue
+                idx = _extract_index(fname)
+                if idx is None:
                     continue
                 mask_map[idx] = os.path.join(path, fname)
             return mask_map
@@ -794,7 +812,7 @@ class LoadMultiviewImages:
         images = []
         masks = []
 
-        for file_name in image_files:
+        for idx, file_name in image_entries:
             img_path = os.path.join(path, file_name)
             raw_img = Image.open(img_path)
             alpha_channel = None
@@ -805,7 +823,6 @@ class LoadMultiviewImages:
             img_tensor = torch.from_numpy(img_np)
             images.append(img_tensor)
 
-            idx = int(file_name.split('_')[1].split('.')[0])
             mask_tensor = None
 
             mask_path = mask_map.get(idx)

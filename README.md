@@ -242,6 +242,39 @@ mesh_with_vertex_colors (TRIMESH): Mesh containing the aggregated vertex colors 
 
 color_map (IMAGE): The baked UV texture as a torch tensor image.
 
+Bake To Model
+Reprojects edited multiview images generated from SeqTex Step 1 back onto the original mesh using nvdiffrast and the saved MVP/W2C tensors. This node updates both the mesh vertex colors and a UV texture simultaneously so you can round-trip through IP-Adapter / diffusion edits without leaving Comfy.
+
+Category: Vertex Bake
+
+Function: bake
+
+Inputs:
+
+mesh (TRIMESH): Processed mesh from SeqTex Step 1.
+
+multiview_images (IMAGE): Batch of edited renders (must match the SeqTex view preset ordering).
+
+seqtex_view_preset (ENUM): 2, 4, 6, or 12 views. Presets 2/4/6 take the specified subset of the provided image batch; preset 12 expects all twelve.
+
+texture_resolution (ENUM): Output texture size. Options: 512, 1024, 2048, 4096, 8192. Default: 2048
+
+margin (INT): UV bleeding distance in pixels. Default: 16 (Min: 0, Max: 4096)
+
+mvp_matrix_path / w2c_matrix_path (STRING): Paths that SeqTex Step 1 emitted for the per-view MVP and world-to-camera tensors.
+
+camera_config (HY3DCAMERA, optional): Camera metadata from the SeqTexCam node; used to validate preset selection.
+
+blend_angle_start / blend_angle_end (FLOAT): Controls angular weighting when accumulating colors from each camera.
+
+multiview_masks (MASK, optional): Optional per-view masks to attenuate contributions.
+
+Outputs:
+
+mesh_with_vertex_colors (TRIMESH): Mesh with vertex colors updated using the new projections.
+
+color_map (IMAGE): The baked UV texture as a torch tensor.
+
 Comfy_BlenderTools/Rendering & Export
 Render Depth Map (Blender)
 Renders a depth map of a 3D mesh from a specified camera perspective using Blender's Cycles renderer. Supports single or multi-view rendering.
