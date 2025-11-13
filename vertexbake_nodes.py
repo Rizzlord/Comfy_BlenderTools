@@ -1497,7 +1497,18 @@ def _convert_vertices_to_seqtex_space(mesh):
     seqtex_normals[:, 2] = normals[:, 1]
     return seqtex_vertices, seqtex_normals
 
-def _project_seqtex_multiview_texture(mesh, images, masks, mvp_matrix, w2c_matrix, texture_resolution, margin, angle_start, angle_end):
+def _project_seqtex_multiview_texture(
+    mesh,
+    images,
+    masks,
+    mvp_matrix,
+    w2c_matrix,
+    texture_resolution,
+    margin,
+    angle_start,
+    angle_end,
+    blend_smoothness,
+):
     if dr is None:
         raise ImportError("nvdiffrast is required for BakeToModel. Install nvdiffrast to enable this node.")
     if not torch.cuda.is_available():
@@ -1547,6 +1558,7 @@ def _project_seqtex_multiview_texture(mesh, images, masks, mvp_matrix, w2c_matri
     cos_full = math.cos(math.radians(angle_start))
     cos_zero = math.cos(math.radians(angle_end))
     cos_range = max(cos_full - cos_zero, 1e-6)
+    smooth_strength = max(0.0, min(1.0, float(blend_smoothness)))
 
     for view_idx in range(num_views):
         img = images[view_idx]
@@ -1563,6 +1575,9 @@ def _project_seqtex_multiview_texture(mesh, images, masks, mvp_matrix, w2c_matri
         view_dir = F.normalize(-pos_map, dim=-1, eps=1e-8)
         cos_theta = torch.clamp((normal_map * view_dir).sum(dim=-1), min=0.0)
         angle_weight = torch.clamp((cos_theta - cos_zero) / cos_range, min=0.0, max=1.0)
+        if smooth_strength > 1e-6:
+            smooth = angle_weight * angle_weight * (3.0 - 2.0 * angle_weight)
+            angle_weight = angle_weight + (smooth - angle_weight) * smooth_strength
 
         mask_flat = coverage.view(-1)
         if not mask_flat.any():
@@ -2185,6 +2200,7 @@ class BakeToModel:
                 "w2c_matrix_path": ("STRING", {"default": ""}),
                 "blend_angle_start": ("FLOAT", {"default": 40.0, "min": 0.0, "max": 85.0, "step": 0.5}),
                 "blend_angle_end": ("FLOAT", {"default": 60.0, "min": 0.0, "max": 120.0, "step": 0.5}),
+                "blend_smoothness": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05}),
             },
             "optional": {
                 "camera_config": ("HY3DCAMERA",),
@@ -2208,6 +2224,7 @@ class BakeToModel:
         w2c_matrix_path,
         blend_angle_start,
         blend_angle_end,
+        blend_smoothness,
         camera_config=None,
         multiview_masks=None,
     ):
@@ -2264,6 +2281,7 @@ class BakeToModel:
             int(margin),
             float(blend_angle_start),
             float(blend_angle_end),
+            float(blend_smoothness),
         )
 
         mesh_result = mesh.copy()
@@ -2289,6 +2307,7 @@ class SeqTexProjectTexture:
                 "w2c_matrix_path": ("STRING", {"default": ""}),
                 "blend_angle_start": ("FLOAT", {"default": 40.0, "min": 0.0, "max": 85.0, "step": 0.5}),
                 "blend_angle_end": ("FLOAT", {"default": 60.0, "min": 0.0, "max": 120.0, "step": 0.5}),
+                "blend_smoothness": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "flip_images": ("BOOLEAN", {"default": False}),
             },
             "optional": {
@@ -2313,6 +2332,7 @@ class SeqTexProjectTexture:
         w2c_matrix_path,
         blend_angle_start,
         blend_angle_end,
+        blend_smoothness,
         flip_images,
         mask_images_path="",
         multiview_masks=None,
@@ -2365,6 +2385,7 @@ class SeqTexProjectTexture:
             int(margin),
             float(blend_angle_start),
             float(blend_angle_end),
+            float(blend_smoothness),
         )
 
         color_map = torch.from_numpy(texture_rgba[:, :, :3].astype(np.float32) / 255.0).unsqueeze(0)
