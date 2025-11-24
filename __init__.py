@@ -2,6 +2,7 @@ from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap,
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
 from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
 from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake, MultiviewTextureBake, AutoBakeTextureFromMV, SeqTexCam, BakeToModel, SeqTexProjectTexture
+from .ply_nodes import GS_PlyToMesh
 
 
 NODE_CLASS_MAPPINGS = {
@@ -38,6 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "InstantMeshes": InstantMeshes,
     "UnwrapColoredMesh": UnwrapColoredMesh,
     "BlenderPreview": BlenderPreview,
+    "GS_PlyToMesh": GS_PlyToMesh,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -74,6 +76,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "InstantMeshes": "Instant Meshes (Quad Remesher)",
     "UnwrapColoredMesh": "Unwrap Colored Mesh (UVgami)",
     "BlenderPreview": "Blender Preview",
+    "GS_PlyToMesh": "GS Ply To Mesh",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
