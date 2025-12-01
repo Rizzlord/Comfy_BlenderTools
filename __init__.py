@@ -1,7 +1,38 @@
-from .blender_nodes import BlenderDecimate, BlenderUnwrap, MinistryOfFlatUnwrap, BlenderExportGLB
-from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial, SaveMultiviewImages, LoadMultiviewImages
-from .utils import Voxelize, VoxelSettings, OtherModesSettings, TextureToHeight, DisplaceMesh, SmoothMesh, ProcessMesh, MirrorMesh, QuadriflowRemesh, QuadriflowSettings, SubdivisionMesh, Pyremesh, O3DRemesh, InstantMeshes, UnwrapColoredMesh, BlenderPreview
-from .vertexbake_nodes import VertexToHighPoly, MultiviewDisplaceMesh, VertexColorBake, MultiviewTextureBake, AutoBakeTextureFromMV, SeqTexCam, BakeToModel, SeqTexProjectTexture
+from .blender_nodes import (
+    BlenderDecimate,
+    BlenderUnwrap,
+    MinistryOfFlatUnwrap,
+    BlenderExportGLB,
+)
+from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
+from .utils import (
+    Voxelize,
+    VoxelSettings,
+    OtherModesSettings,
+    TextureToHeight,
+    DisplaceMesh,
+    SmoothMesh,
+    ProcessMesh,
+    MirrorMesh,
+    QuadriflowRemesh,
+    QuadriflowSettings,
+    SubdivisionMesh,
+    Pyremesh,
+    O3DRemesh,
+    InstantMeshes,
+    UnwrapColoredMesh,
+    BlenderPreview,
+)
+from .vertexbake_nodes import (
+    VertexToHighPoly,
+    MultiviewDisplaceMesh,
+    VertexColorBake,
+    MultiviewTextureBake,
+    AutoBakeTextureFromMV,
+    SeqTexCam,
+    BakeToModel,
+    SeqTexProjectTexture,
+)
 from .ply_nodes import GS_PlyToMesh
 
 
@@ -10,8 +41,6 @@ NODE_CLASS_MAPPINGS = {
     "BlenderUnwrap": BlenderUnwrap,
     "MinistryOfFlatUnwrap": MinistryOfFlatUnwrap,
     "TextureBake": TextureBake,
-    "SaveMultiviewImages": SaveMultiviewImages,
-    "LoadMultiviewImages": LoadMultiviewImages,
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
@@ -47,8 +76,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderUnwrap": "Blender Unwrap",
     "MinistryOfFlatUnwrap": "Ministry of Flat Unwrap",
     "TextureBake": "Blender Bake Maps",
-    "SaveMultiviewImages": "Save Multiview Images",
-    "LoadMultiviewImages": "Load Multiview Images",
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
@@ -79,4 +106,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GS_PlyToMesh": "GS Ply To Mesh",
 }
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
