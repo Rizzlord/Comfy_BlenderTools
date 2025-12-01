@@ -31,7 +31,6 @@ from .vertexbake_nodes import (
     AutoBakeTextureFromMV,
     SeqTexCam,
     BakeToModel,
-    SeqTexProjectTexture,
 )
 from .ply_nodes import GS_PlyToMesh
 
@@ -58,7 +57,6 @@ NODE_CLASS_MAPPINGS = {
     "AutoBakeTextureFromMV": AutoBakeTextureFromMV,
     "SeqTexCam": SeqTexCam,
     "BakeToModel": BakeToModel,
-    "SeqTexProjectTexture": SeqTexProjectTexture,
     "VertexColorBake": VertexColorBake,
     "ProcessMesh": ProcessMesh,
     "MirrorMesh": MirrorMesh,
@@ -93,7 +91,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AutoBakeTextureFromMV": "Auto Bake Texture (Multiview)",
     "SeqTexCam": "SeqTex Cam",
     "BakeToModel": "Bake To Model",
-    "SeqTexProjectTexture": "SeqTex Project Texture",
     "VertexColorBake": "Bake Vertex Color",
     "ProcessMesh": "Process Mesh",
     "MirrorMesh": "Mirror Mesh",
