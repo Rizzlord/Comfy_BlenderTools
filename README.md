@@ -242,6 +242,72 @@ mesh_with_vertex_colors (TRIMESH): Mesh containing the aggregated vertex colors 
 
 color_map (IMAGE): The baked UV texture as a torch tensor image.
 
+Bake To Model
+Reprojects edited multiview images generated from SeqTex Step 1 back onto the original mesh using nvdiffrast and the saved MVP/W2C tensors. This node updates both the mesh vertex colors and a UV texture simultaneously so you can round-trip through IP-Adapter / diffusion edits without leaving Comfy.
+
+Category: Vertex Bake
+
+Function: bake
+
+Inputs:
+
+mesh (TRIMESH): Processed mesh from SeqTex Step 1.
+
+multiview_images (IMAGE): Batch of edited renders (must match the SeqTex view preset ordering).
+
+seqtex_view_preset (ENUM): 2, 4, 6, or 12 views. Presets 2/4/6 take the specified subset of the provided image batch; preset 12 expects all twelve.
+
+texture_resolution (ENUM): Output texture size. Options: 512, 1024, 2048, 4096, 8192. Default: 2048
+
+margin (INT): UV bleeding distance in pixels. Default: 16 (Min: 0, Max: 4096)
+
+mvp_matrix_path / w2c_matrix_path (STRING): Paths that SeqTex Step 1 emitted for the per-view MVP and world-to-camera tensors.
+
+camera_config (HY3DCAMERA, optional): Camera metadata from the SeqTexCam node; used to validate preset selection.
+
+blend_angle_start / blend_angle_end (FLOAT): Controls angular weighting when accumulating colors from each camera.
+
+multiview_masks (MASK, optional): Optional per-view masks to attenuate contributions.
+
+Outputs:
+
+mesh_with_vertex_colors (TRIMESH): Mesh with vertex colors updated using the new projections.
+
+color_map (IMAGE): The baked UV texture as a torch tensor.
+
+SeqTex Project Texture
+Utility node for the “images → texture only” path. Supply the SeqTex Step 1 mesh plus its saved MVP/W2C tensors and any multiview image batch (IP-Adapter edits, manual paintovers, etc.), and this node will nvdiffrast-project them straight into UV space—no WAN/SeqTex diffusion step needed.
+
+Category: Vertex Bake
+
+Function: project_texture
+
+Inputs:
+
+mesh (TRIMESH): Mesh output from SeqTex Step 1 (or any UV-mapped mesh that matches the saved tensors).
+
+multiview_images (IMAGE): Batch of RGB views aligned to the SeqTex preset ordering.
+
+seqtex_view_preset (ENUM): 2, 4, 6, or 12. Determines how the batch is trimmed (2→views {1,3}, 4→first four, 6→first six, 12→all twelve).
+
+flip_images (BOOLEAN): When enabled, flips each view vertically before projection (handy if your edits were rendered upside-down).
+
+texture_resolution (ENUM): Output texture size. Options: 512, 1024, 2048, 4096, 8192.
+
+margin (INT): UV bleed radius in pixels.
+
+mvp_matrix_path / w2c_matrix_path (STRING): Paths emitted by SeqTex Step 1 for the camera matrices (connect them directly from that node).
+
+blend_angle_start / blend_angle_end (FLOAT): Controls angular falloff when combining views.
+
+mask_images_path (STRING, optional): SeqTex mask tensor path; automatically sliced to the preset if multiview_masks isn’t provided.
+
+multiview_masks (MASK, optional): Direct mask batch to gate the projection.
+
+Outputs:
+
+color_map (IMAGE): The UV texture as a torch tensor (RGB, single image). Use Save Image to write it, or feed it into downstream nodes.
+
 Comfy_BlenderTools/Rendering & Export
 Render Depth Map (Blender)
 Renders a depth map of a 3D mesh from a specified camera perspective using Blender's Cycles renderer. Supports single or multi-view rendering.

@@ -6,8 +6,10 @@ import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
 import torch
+import re
 from PIL import Image, ImageFilter
 from .utils import _run_blender_script, get_blender_clean_mesh_func_script
+
 
 class TextureBake:
     RESOLUTIONS = ["512", "1024", "2048", "4096", "8192"]
@@ -23,43 +25,107 @@ class TextureBake:
                 "bake_mr_map": ("BOOLEAN", {"default": True}),
                 "bake_normal": ("BOOLEAN", {"default": True}),
                 "bake_ao": ("BOOLEAN", {"default": True}),
-                "ao_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
+                "ao_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1},
+                ),
                 "bake_thickness": ("BOOLEAN", {"default": True}),
-                "thickness_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1}),
+                "thickness_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1},
+                ),
                 "bake_cavity": ("BOOLEAN", {"default": True}),
-                "cavity_contrast": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "cage_extrusion": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "max_ray_distance": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "cavity_contrast": (
+                    "FLOAT",
+                    {"default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1},
+                ),
+                "cage_extrusion": (
+                    "FLOAT",
+                    {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "max_ray_distance": (
+                    "FLOAT",
+                    {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
                 "margin": ("INT", {"default": 1024, "min": 0, "max": 2048}),
                 "use_high_poly_textures": ("BOOLEAN", {"default": False}),
                 "use_gpu": ("BOOLEAN", {"default": True}),
                 "blur_atc": ("BOOLEAN", {"default": True}),
-                "atc_blur_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1}),
+                "atc_blur_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1},
+                ),
                 "blur_mr": ("BOOLEAN", {"default": False}),
-                "mr_blur_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1}),
+                "mr_blur_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 150.0, "step": 0.1},
+                ),
             }
         }
 
-    RETURN_TYPES = ("TRIMESH", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("low_poly_mesh", "albedo_map", "normal_map", "mr_map", "ao_map", "thickness_map", "cavity_map", "atc_map")
+    RETURN_TYPES = (
+        "TRIMESH",
+        "IMAGE",
+        "IMAGE",
+        "IMAGE",
+        "IMAGE",
+        "IMAGE",
+        "IMAGE",
+        "IMAGE",
+    )
+    RETURN_NAMES = (
+        "low_poly_mesh",
+        "albedo_map",
+        "normal_map",
+        "mr_map",
+        "ao_map",
+        "thickness_map",
+        "cavity_map",
+        "atc_map",
+    )
     FUNCTION = "bake"
     CATEGORY = "Comfy_BlenderTools"
 
-    def bake(self, high_poly_mesh, low_poly_mesh, resolution, bake_albedo, bake_mr_map, bake_normal, bake_ao, ao_strength,
-             bake_thickness, thickness_strength, bake_cavity, cavity_contrast,
-             cage_extrusion, max_ray_distance, margin, use_high_poly_textures, use_gpu,
-             blur_atc, atc_blur_strength, blur_mr, mr_blur_strength):
+    def bake(
+        self,
+        high_poly_mesh,
+        low_poly_mesh,
+        resolution,
+        bake_albedo,
+        bake_mr_map,
+        bake_normal,
+        bake_ao,
+        ao_strength,
+        bake_thickness,
+        thickness_strength,
+        bake_cavity,
+        cavity_contrast,
+        cage_extrusion,
+        max_ray_distance,
+        margin,
+        use_high_poly_textures,
+        use_gpu,
+        blur_atc,
+        atc_blur_strength,
+        blur_mr,
+        mr_blur_strength,
+    ):
 
         dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
         def get_material(mesh):
-            if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'material'):
+            if hasattr(mesh, "visual") and hasattr(mesh.visual, "material"):
                 return mesh.visual.material
             return None
+
         high_material = get_material(high_poly_mesh)
         low_material = get_material(low_poly_mesh)
 
-        material_preference = [high_material, low_material] if use_high_poly_textures else [low_material, high_material]
+        material_preference = (
+            [high_material, low_material]
+            if use_high_poly_textures
+            else [low_material, high_material]
+        )
 
         def tensor_from_materials(materials, attr):
             for material in materials:
@@ -68,7 +134,7 @@ class TextureBake:
                 texture = getattr(material, attr)
                 if texture is None:
                     continue
-                pil_img = texture.convert('RGB')
+                pil_img = texture.convert("RGB")
                 img_array = np.array(pil_img).astype(np.float32) / 255.0
                 return torch.from_numpy(img_array)[None,]
             return None
@@ -80,20 +146,28 @@ class TextureBake:
                 texture = getattr(material, attr)
                 if texture is None:
                     continue
-                return texture.convert('RGB')
+                return texture.convert("RGB")
             return None
 
-        albedo_map_tensor = tensor_from_materials(material_preference, 'baseColorTexture')
-        mr_map_tensor = tensor_from_materials(material_preference, 'metallicRoughnessTexture')
-        normal_map_tensor = tensor_from_materials(material_preference, 'normalTexture')
-        ao_map_tensor = tensor_from_materials(material_preference, 'occlusionTexture')
+        albedo_map_tensor = tensor_from_materials(
+            material_preference, "baseColorTexture"
+        )
+        mr_map_tensor = tensor_from_materials(
+            material_preference, "metallicRoughnessTexture"
+        )
+        normal_map_tensor = tensor_from_materials(material_preference, "normalTexture")
+        ao_map_tensor = tensor_from_materials(material_preference, "occlusionTexture")
         thickness_map_tensor = None
         cavity_map_tensor = None
 
-        selected_albedo_image = select_texture_image('baseColorTexture')
-        selected_mr_image = select_texture_image('metallicRoughnessTexture')
+        selected_albedo_image = select_texture_image("baseColorTexture")
+        selected_mr_image = select_texture_image("metallicRoughnessTexture")
 
-        original_material = low_poly_mesh.visual.material if hasattr(low_poly_mesh.visual, 'material') else None
+        original_material = (
+            low_poly_mesh.visual.material
+            if hasattr(low_poly_mesh.visual, "material")
+            else None
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             high_poly_path = os.path.join(temp_dir, "high.obj")
@@ -115,17 +189,27 @@ class TextureBake:
                 selected_mr_image.save(mr_texture_path)
 
             params = {
-                'high_poly_path': high_poly_path, 'low_poly_path': low_poly_path,
-                'final_low_poly_path': final_low_poly_path, 'temp_dir': temp_dir,
-                'bake_albedo': bake_albedo, 'bake_mr': bake_mr_map, 'bake_normal': bake_normal, 
-                'bake_ao': bake_ao, 'ao_strength': ao_strength, 'bake_thickness': bake_thickness, 
-                'thickness_strength': thickness_strength, 'bake_cavity': bake_cavity, 
-                'cavity_contrast': cavity_contrast, 'resolution': int(resolution), 
-                'cage_extrusion': cage_extrusion, 'max_ray_distance': max_ray_distance, 'margin': margin,
-                'use_high_poly_textures': use_high_poly_textures,
-                'use_gpu': use_gpu,
-                'albedo_texture_path': albedo_texture_path,
-                'mr_texture_path': mr_texture_path
+                "high_poly_path": high_poly_path,
+                "low_poly_path": low_poly_path,
+                "final_low_poly_path": final_low_poly_path,
+                "temp_dir": temp_dir,
+                "bake_albedo": bake_albedo,
+                "bake_mr": bake_mr_map,
+                "bake_normal": bake_normal,
+                "bake_ao": bake_ao,
+                "ao_strength": ao_strength,
+                "bake_thickness": bake_thickness,
+                "thickness_strength": thickness_strength,
+                "bake_cavity": bake_cavity,
+                "cavity_contrast": cavity_contrast,
+                "resolution": int(resolution),
+                "cage_extrusion": cage_extrusion,
+                "max_ray_distance": max_ray_distance,
+                "margin": margin,
+                "use_high_poly_textures": use_high_poly_textures,
+                "use_gpu": use_gpu,
+                "albedo_texture_path": albedo_texture_path,
+                "mr_texture_path": mr_texture_path,
             }
 
             clean_mesh_func_script = get_blender_clean_mesh_func_script()
@@ -499,7 +583,7 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 """
-            with open(script_path, 'w') as f:
+            with open(script_path, "w") as f:
                 f.write(script)
 
             _run_blender_script(script_path)
@@ -507,11 +591,14 @@ except Exception as e:
             res_int = int(resolution)
 
             def load_image_as_tensor(path):
-                if not os.path.exists(path): return None
-                img = Image.open(path).convert('RGB')
+                if not os.path.exists(path):
+                    return None
+                img = Image.open(path).convert("RGB")
                 return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
-            albedo_bake_tensor = load_image_as_tensor(os.path.join(temp_dir, "albedo_map.png"))
+            albedo_bake_tensor = load_image_as_tensor(
+                os.path.join(temp_dir, "albedo_map.png")
+            )
             if albedo_bake_tensor is not None:
                 albedo_map_tensor = albedo_bake_tensor
 
@@ -521,33 +608,61 @@ except Exception as e:
             if blur_mr and mr_map_tensor is not None:
                 mr_map_tensor = self._blur_image_tensor(mr_map_tensor, mr_blur_strength)
 
-            normal_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "normal_map.png"))
+            normal_map_tensor = load_image_as_tensor(
+                os.path.join(temp_dir, "normal_map.png")
+            )
             ao_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "ao_map.png"))
-            thickness_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "thickness_map.png"))
-            cavity_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "cavity_map.png"))
+            thickness_map_tensor = load_image_as_tensor(
+                os.path.join(temp_dir, "thickness_map.png")
+            )
+            cavity_map_tensor = load_image_as_tensor(
+                os.path.join(temp_dir, "cavity_map.png")
+            )
 
             atc_map_tensor = None
             if any([bake_ao, bake_thickness, bake_cavity]):
-                black_channel = torch.zeros((1, res_int, res_int, 1), dtype=torch.float32)
-                
-                r_channel = ao_map_tensor[:, :, :, 0:1] if ao_map_tensor is not None else black_channel
-                g_channel = thickness_map_tensor[:, :, :, 0:1] if thickness_map_tensor is not None else black_channel
-                b_channel = cavity_map_tensor[:, :, :, 0:1] if cavity_map_tensor is not None else black_channel
-                
+                black_channel = torch.zeros(
+                    (1, res_int, res_int, 1), dtype=torch.float32
+                )
+
+                r_channel = (
+                    ao_map_tensor[:, :, :, 0:1]
+                    if ao_map_tensor is not None
+                    else black_channel
+                )
+                g_channel = (
+                    thickness_map_tensor[:, :, :, 0:1]
+                    if thickness_map_tensor is not None
+                    else black_channel
+                )
+                b_channel = (
+                    cavity_map_tensor[:, :, :, 0:1]
+                    if cavity_map_tensor is not None
+                    else black_channel
+                )
+
                 atc_map_tensor = torch.cat([r_channel, g_channel, b_channel], dim=-1)
             if atc_map_tensor is not None and blur_atc:
-                atc_map_tensor = self._blur_image_tensor(atc_map_tensor, atc_blur_strength)
+                atc_map_tensor = self._blur_image_tensor(
+                    atc_map_tensor, atc_blur_strength
+                )
 
             final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
-            uv_data = final_mesh.visual.uv if hasattr(final_mesh.visual, 'uv') else None
+            uv_data = final_mesh.visual.uv if hasattr(final_mesh.visual, "uv") else None
 
             def tensor_to_pil(tensor):
                 if tensor is None:
                     return None
-                array = np.clip(tensor[0].cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+                array = np.clip(tensor[0].cpu().numpy() * 255.0, 0, 255).astype(
+                    np.uint8
+                )
                 return Image.fromarray(array)
 
-            final_material = original_material if original_material else trimesh_loader.visual.material.PBRMaterial()
+            final_material = (
+                original_material
+                if original_material
+                else trimesh_loader.visual.material.PBRMaterial()
+            )
 
             base_color_texture = tensor_to_pil(albedo_map_tensor)
             metallic_roughness_texture = tensor_to_pil(mr_map_tensor)
@@ -564,18 +679,26 @@ except Exception as e:
                 final_material.occlusionTexture = ao_texture
 
             if uv_data is not None:
-                final_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=uv_data, material=final_material)
+                final_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+                    uv=uv_data, material=final_material
+                )
             else:
                 final_mesh.visual.material = final_material
 
-            return (final_mesh,
-                    albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
-                    normal_map_tensor if normal_map_tensor is not None else dummy_image,
-                    mr_map_tensor if mr_map_tensor is not None else dummy_image,
-                    ao_map_tensor if ao_map_tensor is not None else dummy_image,
-                    thickness_map_tensor if thickness_map_tensor is not None else dummy_image,
-                    cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
-                    atc_map_tensor if atc_map_tensor is not None else dummy_image)
+            return (
+                final_mesh,
+                albedo_map_tensor if albedo_map_tensor is not None else dummy_image,
+                normal_map_tensor if normal_map_tensor is not None else dummy_image,
+                mr_map_tensor if mr_map_tensor is not None else dummy_image,
+                ao_map_tensor if ao_map_tensor is not None else dummy_image,
+                (
+                    thickness_map_tensor
+                    if thickness_map_tensor is not None
+                    else dummy_image
+                ),
+                cavity_map_tensor if cavity_map_tensor is not None else dummy_image,
+                atc_map_tensor if atc_map_tensor is not None else dummy_image,
+            )
 
     @staticmethod
     def _blur_image_tensor(image_tensor, strength):
@@ -606,6 +729,7 @@ except Exception as e:
         result = torch.stack(blurred_batches, dim=0)
         return result.to(device=device, dtype=dtype)
 
+
 class ApplyMaterial:
     @classmethod
     def INPUT_TYPES(cls):
@@ -618,7 +742,7 @@ class ApplyMaterial:
                 "normal_map": ("IMAGE",),
                 "mr_map": ("IMAGE",),
                 "ao_map": ("IMAGE",),
-            }
+            },
         }
 
     RETURN_TYPES = ("TRIMESH",)
@@ -628,11 +752,17 @@ class ApplyMaterial:
 
     def apply(self, mesh, albedo_map=None, normal_map=None, mr_map=None, ao_map=None):
         new_mesh = mesh.copy()
-        if not hasattr(new_mesh, 'visual') or not hasattr(new_mesh.visual, 'uv'):
-            raise Exception("Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node.")
+        if not hasattr(new_mesh, "visual") or not hasattr(new_mesh.visual, "uv"):
+            raise Exception(
+                "Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node."
+            )
 
         material = None
-        if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
+        if (
+            hasattr(mesh, "visual")
+            and hasattr(mesh.visual, "material")
+            and mesh.visual.material is not None
+        ):
             material = mesh.visual.material.copy()
         else:
             material = trimesh_loader.visual.material.PBRMaterial()
@@ -640,7 +770,7 @@ class ApplyMaterial:
         def tensor_to_pil(tensor):
             if tensor is None:
                 return None
-            i = 255. * tensor[0].cpu().numpy()
+            i = 255.0 * tensor[0].cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             return img.convert("RGB")
 
@@ -649,30 +779,36 @@ class ApplyMaterial:
             x_checkers = np.floor_divide(indices, checker_size)
             y_checkers = np.floor_divide(indices, checker_size)[:, np.newaxis]
             pattern = (x_checkers + y_checkers) % 2
-            
+
             black = [0, 0, 0]
             purple = [255, 0, 255]
-            
+
             img_array = np.array([black, purple], dtype=np.uint8)[pattern]
-            return Image.fromarray(img_array, 'RGB')
+            return Image.fromarray(img_array, "RGB")
 
         if albedo_map is not None:
             material.baseColorTexture = tensor_to_pil(albedo_map)
-        elif not hasattr(material, 'baseColorTexture') or material.baseColorTexture is None:
+        elif (
+            not hasattr(material, "baseColorTexture")
+            or material.baseColorTexture is None
+        ):
             material.baseColorTexture = create_checker_map_pil()
 
         if normal_map is not None:
             material.normalTexture = tensor_to_pil(normal_map)
-        
+
         if mr_map is not None:
             material.metallicRoughnessTexture = tensor_to_pil(mr_map)
 
         if ao_map is not None:
             material.occlusionTexture = tensor_to_pil(ao_map)
 
-        new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_mesh.visual.uv, material=material)
+        new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
+            uv=new_mesh.visual.uv, material=material
+        )
 
         return (new_mesh,)
+
 
 class ExtractMaterial:
     @classmethod
@@ -694,137 +830,19 @@ class ExtractMaterial:
         def pil_to_tensor(pil_img):
             if pil_img is None:
                 return dummy_image
-            
-            pil_img = pil_img.convert('RGB')
+
+            pil_img = pil_img.convert("RGB")
             img_array = np.array(pil_img).astype(np.float32) / 255.0
             return torch.from_numpy(img_array)[None,]
 
-        if not hasattr(mesh, 'visual') or not hasattr(mesh.visual, 'material'):
+        if not hasattr(mesh, "visual") or not hasattr(mesh.visual, "material"):
             return (dummy_image, dummy_image, dummy_image, dummy_image)
 
         mat = mesh.visual.material
-        
-        albedo_map = pil_to_tensor(getattr(mat, 'baseColorTexture', None))
-        normal_map = pil_to_tensor(getattr(mat, 'normalTexture', None))
-        mr_map = pil_to_tensor(getattr(mat, 'metallicRoughnessTexture', None))
-        ao_map = pil_to_tensor(getattr(mat, 'occlusionTexture', None))
+
+        albedo_map = pil_to_tensor(getattr(mat, "baseColorTexture", None))
+        normal_map = pil_to_tensor(getattr(mat, "normalTexture", None))
+        mr_map = pil_to_tensor(getattr(mat, "metallicRoughnessTexture", None))
+        ao_map = pil_to_tensor(getattr(mat, "occlusionTexture", None))
 
         return (albedo_map, normal_map, mr_map, ao_map)
-
-class SaveMultiviewImages:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "path": ("STRING", {"default": "multiview_bake"}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("path",)
-    FUNCTION = "save"
-    CATEGORY = "Comfy_BlenderTools"
-    OUTPUT_NODE = True
-
-    def save(self, images, path):
-        output_dir = folder_paths.get_output_directory()
-        full_path = os.path.join(output_dir, path)
-
-        counter = 1
-        while os.path.exists(f"{full_path}_{counter:05}_"):
-            counter += 1
-        
-        final_path = f"{full_path}_{counter:05}_"
-        os.makedirs(final_path, exist_ok=True)
-
-        for i, image_tensor in enumerate(images):
-            img_pil = Image.fromarray((image_tensor.cpu().numpy() * 255).astype(np.uint8))
-            img_pil.save(os.path.join(final_path, f"MV_{i+1}.png"))
-            
-        return (final_path,)
-
-class LoadMultiviewImages:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "path": ("STRING", {"default": ""}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "masks")
-    FUNCTION = "load"
-    CATEGORY = "Comfy_BlenderTools"
-
-    def load(self, path):
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Path does not exist: {path}")
-
-        image_files = sorted(
-            [f for f in os.listdir(path) if f.startswith("MV_") and f.endswith(".png")],
-            key=lambda x: int(x.split('_')[1].split('.')[0])
-        )
-
-        if not image_files:
-            raise FileNotFoundError(f"No multiview images (MV_*.png) found in {path}")
-
-        def _build_mask_map():
-            mask_files = [
-                f for f in os.listdir(path)
-                if f.lower().endswith(".png") and (f.lower().startswith("mv_mask_") or f.lower().startswith("mask_"))
-            ]
-            mask_map = {}
-            for fname in mask_files:
-                stem = os.path.splitext(fname)[0]
-                parts = stem.split('_')
-                if not parts:
-                    continue
-                idx_str = parts[-1]
-                try:
-                    idx = int(idx_str)
-                except ValueError:
-                    continue
-                mask_map[idx] = os.path.join(path, fname)
-            return mask_map
-
-        mask_map = _build_mask_map()
-
-        images = []
-        masks = []
-
-        for file_name in image_files:
-            img_path = os.path.join(path, file_name)
-            raw_img = Image.open(img_path)
-            alpha_channel = None
-            if 'A' in raw_img.getbands():
-                alpha_channel = np.array(raw_img.getchannel('A')).astype(np.float32) / 255.0
-            img_rgb = raw_img.convert("RGB")
-            img_np = np.array(img_rgb).astype(np.float32) / 255.0
-            img_tensor = torch.from_numpy(img_np)
-            images.append(img_tensor)
-
-            idx = int(file_name.split('_')[1].split('.')[0])
-            mask_tensor = None
-
-            mask_path = mask_map.get(idx)
-            if mask_path:
-                mask_img = Image.open(mask_path)
-                if mask_img.mode != 'L':
-                    mask_img = mask_img.convert('L')
-                if mask_img.size != img_rgb.size:
-                    mask_img = mask_img.resize(img_rgb.size, Image.NEAREST)
-                mask_np = np.array(mask_img).astype(np.float32) / 255.0
-                mask_tensor = torch.from_numpy(mask_np)
-            elif alpha_channel is not None:
-                mask_tensor = torch.from_numpy(alpha_channel.astype(np.float32))
-            else:
-                default_mask = np.ones(img_tensor.shape[:2], dtype=np.float32)
-                mask_tensor = torch.from_numpy(default_mask)
-
-            masks.append(mask_tensor)
-
-        images_tensor = torch.stack(images)
-        masks_tensor = torch.stack(masks)
-        return (images_tensor, masks_tensor)

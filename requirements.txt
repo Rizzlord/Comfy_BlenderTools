@@ -4,3 +4,4 @@ numpy
 Pillow
 pymeshlab
 open3d
+nvdiffrast
