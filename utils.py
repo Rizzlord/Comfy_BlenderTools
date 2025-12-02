@@ -413,6 +413,15 @@ class DisplaceMesh:
         if texture_coords.upper() == 'UV' and (not hasattr(trimesh.visual, 'uv') or len(trimesh.visual.uv) == 0):
             raise Exception("Input mesh must have UV coordinates for displacement with 'UV' texture coordinates. Use BlenderUnwrap first.")
 
+        original_material = None
+        original_uv = None
+        if hasattr(trimesh, "visual"):
+            if hasattr(trimesh.visual, "material") and trimesh.visual.material is not None:
+                mat = trimesh.visual.material
+                original_material = mat.copy() if hasattr(mat, "copy") else mat
+            if hasattr(trimesh.visual, "uv") and trimesh.visual.uv is not None:
+                original_uv = np.array(trimesh.visual.uv, copy=True)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")

@@ -216,7 +216,13 @@ class TextureBake:
 
             script = f"""
 {clean_mesh_func_script}
-import bpy, sys, os, traceback
+import sys, traceback
+try:
+    import bpy, os, numpy as np
+except Exception as e:
+    print(f"Failed to import Blender dependencies: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
 
 def setup_gpu():
@@ -253,6 +259,7 @@ def setup_gpu():
 def setup_scene():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.context.scene.render.engine = 'CYCLES'
+    bpy.context.scene.render.use_compositing = True
     setup_gpu()
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
@@ -328,10 +335,14 @@ def apply_highpoly_textures(high_obj):
             mr_node.image.colorspace_settings.name = 'Non-Color'
             mr_node.interpolation = 'Smart'
             mr_node.name = "TextureBake_MetallicRoughness"
-            separate = nodes.new('ShaderNodeSeparateRGB')
-            links.new(mr_node.outputs['Color'], separate.inputs['Image'])
-            links.new(separate.outputs['G'], principled.inputs['Roughness'])
-            links.new(separate.outputs['B'], principled.inputs['Metallic'])
+            try:
+                separate = nodes.new('ShaderNodeSeparateColor')
+                separate.mode = 'RGB'
+            except Exception:
+                separate = nodes.new('ShaderNodeSeparateRGB')
+            links.new(mr_node.outputs['Color'], separate.inputs[0])
+            links.new(separate.outputs[1], principled.inputs['Roughness'])
+            links.new(separate.outputs[2], principled.inputs['Metallic'])
 
 def enable_emission_bake(obj):
     overrides = []
@@ -434,44 +445,47 @@ def restore_emission_bake(overrides):
             except Exception as exc:
                 print("Warning: failed to restore material link: " + str(exc))
 
+def get_compositor_tree(scene):
+    # Blender 5.0 removed scene.node_tree; compositor lives in compositing_node_group.
+    if hasattr(scene, "compositing_node_group"):
+        tree = getattr(scene, "compositing_node_group", None)
+        if tree is None:
+            tree = bpy.data.node_groups.new("TextureBakeCompositor", "CompositorNodeTree")
+            scene.compositing_node_group = tree
+        if hasattr(scene, "use_nodes"):
+            scene.use_nodes = True
+        return tree
+    if hasattr(scene, "node_tree"):
+        scene.use_nodes = True
+        return scene.node_tree
+    return None
+
 def process_and_save_map(image, output_path, invert=False, strength=1.0, white_bg=False):
-    comp_scene = bpy.context.scene
-    comp_scene.use_nodes = True
-    tree, links = comp_scene.node_tree, comp_scene.node_tree.links
-    tree.nodes.clear()
+    width, height = image.size[0], image.size[1]
+    channels = getattr(image, "channels", 4)
+    pixels = np.array(image.pixels[:], dtype=np.float32)
+    if pixels.size != width * height * channels:
+        raise RuntimeError("Unexpected pixel buffer size while saving baked map.")
+    pixels = pixels.reshape((height, width, channels))
 
-    img_node = tree.nodes.new('CompositorNodeImage'); img_node.image = image
-    
-    current_link = img_node.outputs['Image']
-    
+    rgb = pixels[..., :3]
+    alpha = pixels[..., 3:4] if channels > 3 else np.ones_like(rgb[..., :1])
+
     if invert:
-        invert_node = tree.nodes.new('CompositorNodeInvert')
-        links.new(current_link, invert_node.inputs['Color'])
-        current_link = invert_node.outputs['Color']
-
+        rgb = 1.0 - rgb
     if strength != 1.0:
-        strength_node = tree.nodes.new('CompositorNodeMath')
-        strength_node.operation = 'POWER'
-        strength_node.inputs[1].default_value = strength
-        links.new(current_link, strength_node.inputs[0])
-        current_link = strength_node.outputs['Value']
-
+        rgb = np.clip(rgb, 0.0, 1.0) ** float(strength)
     if white_bg:
-        alpha_over_node = tree.nodes.new('CompositorNodeAlphaOver')
-        alpha_over_node.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
-        links.new(img_node.outputs['Alpha'], alpha_over_node.inputs['Fac'])
-        links.new(current_link, alpha_over_node.inputs[2])
-        current_link = alpha_over_node.outputs['Image']
+        rgb = rgb * alpha + (1.0 - alpha)
 
-    composite_node = tree.nodes.new('CompositorNodeComposite')
-    links.new(current_link, composite_node.inputs['Image'])
-    
-    comp_scene.render.resolution_x, comp_scene.render.resolution_y = image.size
-    comp_scene.render.image_settings.file_format = 'PNG'
-    comp_scene.render.image_settings.color_mode = 'RGB'
-    comp_scene.render.filepath = output_path
-    bpy.ops.render.render(write_still=True)
-    tree.nodes.clear()
+    rgb = np.clip(rgb, 0.0, 1.0)
+    rgba = np.concatenate([rgb, alpha], axis=2)
+    out_img = bpy.data.images.new("ProcessedBake", width=width, height=height, alpha=True)
+    out_img.pixels = rgba.astype(np.float32).reshape(-1).tolist()
+    out_img.filepath_raw = output_path
+    out_img.file_format = "PNG"
+    out_img.save()
+    bpy.data.images.remove(out_img)
 
 def execute_bake(bake_type, tex_node):
     res = p['resolution']
@@ -574,9 +588,54 @@ try:
         if original_high_mat: high_obj.data.materials.append(original_high_mat)
 
     clean_mesh(low_obj, 0.0)
+    bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.select_all(action='DESELECT')
     low_obj.select_set(True)
-    bpy.ops.export_scene.gltf(filepath=p['final_low_poly_path'], export_format='GLB', use_selection=True)
+    bpy.context.view_layer.objects.active = low_obj
+
+    log_path = os.path.join(p['temp_dir'], "export_debug.txt")
+
+    def log(msg):
+        try:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(str(msg) + "\\n")
+        except Exception:
+            pass
+
+    log('Scene objects: ' + ', '.join([o.name for o in bpy.context.scene.objects]))
+    log('Selected objects: ' + ', '.join([o.name for o in bpy.context.selected_objects]))
+    log('Active object: ' + str(getattr(bpy.context.view_layer.objects.active, 'name', None)))
+    log('Current mode: ' + str(bpy.context.mode))
+
+    os.makedirs(os.path.dirname(p['final_low_poly_path']), exist_ok=True)
+
+    def do_export(use_selection=True):
+        try:
+            res = bpy.ops.export_scene.gltf(
+                filepath=p['final_low_poly_path'],
+                export_format='GLB',
+                use_selection=use_selection
+            )
+        except Exception as e:
+            log(f"Export exception (use_selection={{use_selection}}): {{e}}")
+            return None
+        log(f"Export result (use_selection={{use_selection}}): {{res}}")
+        return res
+
+    export_result = do_export(True)
+    if (not export_result or 'FINISHED' not in export_result) or (not os.path.exists(p['final_low_poly_path'])):
+        log("Primary export missing or failed; retrying with use_selection=False")
+        export_result = do_export(False)
+
+    if not export_result or 'FINISHED' not in export_result:
+        log('Temp dir listing: ' + ', '.join(os.listdir(p['temp_dir'])))
+        raise RuntimeError(f"glTF export failed with result: {{export_result}}")
+    if not os.path.exists(p['final_low_poly_path']):
+        log('Temp dir listing: ' + ', '.join(os.listdir(p['temp_dir'])))
+        raise RuntimeError(f"glTF export did not produce file: {{p['final_low_poly_path']}}")
+
+    log('Exported GLB: ' + p['final_low_poly_path'])
+
     sys.exit(0)
 except Exception as e:
     print(f"Blender script failed: {{e}}", file=sys.stderr)
@@ -587,6 +646,44 @@ except Exception as e:
                 f.write(script)
 
             _run_blender_script(script_path)
+
+            # Try to read Blender-side export debug log if present
+            log_path = os.path.join(temp_dir, "export_debug.txt")
+            blender_export_log = None
+            try:
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8") as lf:
+                        blender_export_log = lf.read()
+            except Exception:
+                blender_export_log = None
+
+            temp_listing = []
+            try:
+                temp_listing = os.listdir(temp_dir)
+            except Exception:
+                temp_listing = []
+
+            mesh_path = final_low_poly_path
+            if not os.path.exists(mesh_path):
+                alt_glb = next(
+                    (os.path.join(temp_dir, f) for f in temp_listing if f.lower().endswith(".glb")),
+                    None,
+                )
+                alt_gltf = next(
+                    (os.path.join(temp_dir, f) for f in temp_listing if f.lower().endswith(".gltf")),
+                    None,
+                )
+                if alt_glb and os.path.exists(alt_glb):
+                    mesh_path = alt_glb
+                    print(f"Primary GLB missing, using alternative: {mesh_path}")
+                elif alt_gltf and os.path.exists(alt_gltf):
+                    mesh_path = alt_gltf
+                    print(f"Primary GLB missing, using GLTF: {mesh_path}")
+                else:
+                    print("Temp dir contents after Blender:", temp_listing)
+                    if blender_export_log:
+                        print("Blender export log:\n", blender_export_log)
+                    raise RuntimeError(f"Blender did not produce the expected file: {final_low_poly_path}")
 
             res_int = int(resolution)
 
@@ -647,7 +744,7 @@ except Exception as e:
                     atc_map_tensor, atc_blur_strength
                 )
 
-            final_mesh = trimesh_loader.load(final_low_poly_path, force="mesh")
+            final_mesh = trimesh_loader.load(mesh_path, force="mesh")
             uv_data = final_mesh.visual.uv if hasattr(final_mesh.visual, "uv") else None
 
             def tensor_to_pil(tensor):
