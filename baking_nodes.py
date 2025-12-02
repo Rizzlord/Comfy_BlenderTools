@@ -127,6 +127,14 @@ class TextureBake:
             else [low_material, high_material]
         )
 
+        original_low_uv = (
+            np.array(low_poly_mesh.visual.uv, copy=True)
+            if hasattr(low_poly_mesh, "visual")
+            and hasattr(low_poly_mesh.visual, "uv")
+            and low_poly_mesh.visual.uv is not None
+            else None
+        )
+
         def tensor_from_materials(materials, attr):
             for material in materials:
                 if material is None or not hasattr(material, attr):
@@ -267,11 +275,11 @@ def setup_scene():
 def import_meshes():
     bpy.ops.wm.obj_import(filepath=p['high_poly_path'])
     high_obj = bpy.context.selected_objects[0]; high_obj.name = "HighPoly"
-    clean_mesh(high_obj, 0.0001)
+    sanitize_for_bake(high_obj, 0.0001)
 
     bpy.ops.wm.obj_import(filepath=p['low_poly_path'])
     low_obj = bpy.context.selected_objects[0]; low_obj.name = "LowPoly"
-    clean_mesh(low_obj, 0.0001)
+    sanitize_for_bake(low_obj, 0.0001)
     
     if not low_obj.data.uv_layers:
         raise Exception("Low-poly mesh has no UV map. Please use the BlenderUnwrap node first.")
@@ -460,6 +468,63 @@ def get_compositor_tree(scene):
         return scene.node_tree
     return None
 
+def sanitize_for_bake(obj, merge_distance):
+    # Clean mesh for baking: merge, drop non-UV attributes, clear split normals, smooth.
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        if merge_distance > 0.0:
+            try:
+                bpy.ops.mesh.merge_by_distance(distance=merge_distance)
+            except Exception as exc_merge:
+                print(f"Merge by distance failed: {{exc_merge}}")
+        try:
+            bpy.ops.mesh.customdata_custom_splitnormals_clear()
+        except Exception as exc_norm:
+            print(f"Failed to clear split normals: {{exc_norm}}")
+        try:
+            uv_names = {{uv.name for uv in getattr(obj.data, "uv_layers", [])}}
+            for attr in list(getattr(obj.data, "attributes", [])):
+                if getattr(attr, "is_internal", False):
+                    continue
+                if attr.name in uv_names:
+                    continue
+                if attr.name in {{"position", "normal", "material_index"}}:
+                    continue
+                try:
+                    obj.data.attributes.remove(attr)
+                except Exception as exc_attr:
+                    print(f"Failed to remove attribute {{attr.name}}: {{exc_attr}}")
+        except Exception as exc_attrblock:
+            print(f"Attribute cleanup failed: {{exc_attrblock}}")
+    finally:
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+    try:
+        bpy.ops.object.shade_smooth()
+    except Exception as exc_smooth:
+        print(f"Shade smooth failed: {{exc_smooth}}")
+
+def duplicate_clean_for_normal(obj, name_suffix, merge_distance=0.0001):
+    try:
+        dup = obj.copy()
+        if obj.data:
+            dup.data = obj.data.copy()
+        dup.name = name_suffix
+        bpy.context.collection.objects.link(dup)
+    except Exception as exc:
+        print(f"Failed to duplicate {{name_suffix}} for normal bake: {{exc}}")
+        return None
+
+    sanitize_for_bake(dup, merge_distance)
+    return dup
+
 def process_and_save_map(image, output_path, invert=False, strength=1.0, white_bg=False):
     width, height = image.size[0], image.size[1]
     channels = getattr(image, "channels", 4)
@@ -487,10 +552,19 @@ def process_and_save_map(image, output_path, invert=False, strength=1.0, white_b
     out_img.save()
     bpy.data.images.remove(out_img)
 
-def execute_bake(bake_type, tex_node):
+def execute_bake(bake_type, tex_node, source_obj=None, target_obj=None):
     res = p['resolution']
     bake_image = bpy.data.images.new(name=f"{{bake_type}}_BakeImage", width=res, height=res, alpha=True)
     tex_node.image = bake_image
+
+    tgt = target_obj if target_obj is not None else low_obj
+    src = source_obj if source_obj is not None else high_obj
+    bpy.ops.object.select_all(action='DESELECT')
+    if src is not None:
+        src.select_set(True)
+    if tgt is not None:
+        tgt.select_set(True)
+        bpy.context.view_layer.objects.active = tgt
     
     bake_kwargs = {{
         'type': bake_type, 'use_selected_to_active': True,
@@ -510,15 +584,11 @@ try:
     apply_highpoly_textures(high_obj)
     low_poly_mat, tex_node = setup_lowpoly_material(low_obj)
 
-    bpy.ops.object.select_all(action='DESELECT')
-    high_obj.select_set(True); low_obj.select_set(True)
-    bpy.context.view_layer.objects.active = low_obj
-    
     if p['bake_albedo']:
         emission_overrides = enable_emission_bake(high_obj)
         diffuse_image = None
         try:
-            diffuse_image = execute_bake('EMIT', tex_node)
+            diffuse_image = execute_bake('EMIT', tex_node, source_obj=high_obj, target_obj=low_obj)
             output_path = os.path.join(p['temp_dir'], "albedo_map.png")
             diffuse_image.filepath_raw = output_path
             diffuse_image.file_format = 'PNG'
@@ -533,7 +603,7 @@ try:
         mr_image = None
         try:
             if mr_overrides:
-                mr_image = execute_bake('EMIT', tex_node)
+                mr_image = execute_bake('EMIT', tex_node, source_obj=high_obj, target_obj=low_obj)
                 output_path = os.path.join(p['temp_dir'], "mr_map.png")
                 mr_image.filepath_raw = output_path
                 mr_image.file_format = 'PNG'
@@ -544,20 +614,30 @@ try:
             restore_emission_bake(mr_overrides)
 
     if p['bake_normal']:
-        normal_image = execute_bake('NORMAL', tex_node)
-        output_path = os.path.join(p['temp_dir'], "normal_map.png")
-        normal_image.filepath_raw = output_path
-        normal_image.file_format = 'PNG'; normal_image.save()
-        bpy.data.images.remove(normal_image)
+        normal_high_obj = duplicate_clean_for_normal(high_obj, "HighPoly_NormalBake", 0.0001)
+        normal_low_obj = duplicate_clean_for_normal(low_obj, "LowPoly_NormalBake", 0.0001)
+        cleanup_objs = [o for o in (normal_high_obj, normal_low_obj) if o is not None]
+        try:
+            normal_image = execute_bake('NORMAL', tex_node, source_obj=normal_high_obj or high_obj, target_obj=normal_low_obj or low_obj)
+            output_path = os.path.join(p['temp_dir'], "normal_map.png")
+            normal_image.filepath_raw = output_path
+            normal_image.file_format = 'PNG'; normal_image.save()
+            bpy.data.images.remove(normal_image)
+        finally:
+            for obj in cleanup_objs:
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except Exception as exc:
+                    print(f"Failed to remove normal bake helper {{obj.name}}: {{exc}}")
 
     if p['bake_ao']:
-        ao_image = execute_bake('AO', tex_node)
+        ao_image = execute_bake('AO', tex_node, source_obj=high_obj, target_obj=low_obj)
         process_and_save_map(ao_image, os.path.join(p['temp_dir'], "ao_map.png"), 
                              strength=p['ao_strength'], white_bg=True)
         bpy.data.images.remove(ao_image)
 
     if p['bake_thickness']:
-        thickness_image = execute_bake('AO', tex_node)
+        thickness_image = execute_bake('AO', tex_node, source_obj=high_obj, target_obj=low_obj)
         process_and_save_map(thickness_image, os.path.join(p['temp_dir'], "thickness_map.png"), 
                              invert=True, strength=p['thickness_strength'], white_bg=True)
         bpy.data.images.remove(thickness_image)
@@ -744,8 +824,11 @@ except Exception as e:
                     atc_map_tensor, atc_blur_strength
                 )
 
-            final_mesh = trimesh_loader.load(mesh_path, force="mesh")
+            final_mesh = trimesh_loader.load(mesh_path, force="mesh", process=False)
             uv_data = final_mesh.visual.uv if hasattr(final_mesh.visual, "uv") else None
+            if uv_data is None and original_low_uv is not None:
+                if original_low_uv.shape[0] == final_mesh.vertices.shape[0]:
+                    uv_data = original_low_uv
 
             def tensor_to_pil(tensor):
                 if tensor is None:
@@ -848,27 +931,42 @@ class ApplyMaterial:
     CATEGORY = "Comfy_BlenderTools"
 
     def apply(self, mesh, albedo_map=None, normal_map=None, mr_map=None, ao_map=None):
-        new_mesh = mesh.copy()
-        if not hasattr(new_mesh, "visual") or not hasattr(new_mesh.visual, "uv"):
+        # Keep a safe copy of UVs; bail out early with a clear error if missing
+        uv_data = None
+        if hasattr(mesh, "visual") and hasattr(mesh.visual, "uv") and mesh.visual.uv is not None:
+            uv_data = np.array(mesh.visual.uv, copy=True)
+        if uv_data is None:
             raise Exception(
-                "Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node."
+                "Mesh must have UV coordinates to apply materials. Use the BlenderUnwrap node first."
             )
 
+        new_mesh = mesh.copy()
+
+        # Copy material if possible, otherwise start with a fresh PBR material
         material = None
-        if (
-            hasattr(mesh, "visual")
-            and hasattr(mesh.visual, "material")
-            and mesh.visual.material is not None
-        ):
-            material = mesh.visual.material.copy()
-        else:
+        try:
+            if (
+                hasattr(mesh, "visual")
+                and hasattr(mesh.visual, "material")
+                and mesh.visual.material is not None
+                and hasattr(mesh.visual.material, "copy")
+            ):
+                material = mesh.visual.material.copy()
+        except Exception:
+            material = None
+        if material is None:
             material = trimesh_loader.visual.material.PBRMaterial()
 
         def tensor_to_pil(tensor):
             if tensor is None:
                 return None
-            i = 255.0 * tensor[0].cpu().numpy()
+            # Accept (B,H,W,C) or (H,W,C); always use first batch
+            arr = tensor
+            if tensor.ndim == 4:
+                arr = tensor[0]
+            i = 255.0 * arr.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            # Ensure we always hand back RGB data so PBRMaterial can serialize
             return img.convert("RGB")
 
         def create_checker_map_pil(size=512, checker_size=64):
@@ -900,8 +998,9 @@ class ApplyMaterial:
         if ao_map is not None:
             material.occlusionTexture = tensor_to_pil(ao_map)
 
+        # Re-attach UVs explicitly to avoid losing them on the copy
         new_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(
-            uv=new_mesh.visual.uv, material=material
+            uv=uv_data, material=material
         )
 
         return (new_mesh,)

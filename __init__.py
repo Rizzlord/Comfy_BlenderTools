@@ -3,6 +3,7 @@ from .blender_nodes import (
     BlenderUnwrap,
     MinistryOfFlatUnwrap,
     BlenderExportGLB,
+    ImportBlenderGLB,
 )
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
 from .utils import (
@@ -43,6 +44,7 @@ NODE_CLASS_MAPPINGS = {
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
+    "ImportBlenderGLB": ImportBlenderGLB,
     "Voxelize": Voxelize,
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
@@ -77,6 +79,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
+    "ImportBlenderGLB": "Import Blender GLB",
     "Voxelize": "Blender Remesh",
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",

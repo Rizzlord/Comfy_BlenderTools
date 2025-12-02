@@ -632,15 +632,35 @@ except Exception as e:
             if blender_normals is not None:
                 blender_normals = np.array(blender_normals, copy=True)
 
+            def copy_textures(src, dst):
+                if src is None or dst is None:
+                    return
+                for attr in ("baseColorTexture", "metallicRoughnessTexture", "normalTexture", "occlusionTexture", "emissiveTexture"):
+                    tex = getattr(src, attr, None)
+                    if tex is not None:
+                        setattr(dst, attr, tex)
+
+            # Prefer original material/textures when present, otherwise keep what Blender produced
             final_material = None
             if original_material is not None:
-                final_material = original_material.copy()
-            elif hasattr(cleaned_mesh.visual, 'material') and cleaned_mesh.visual.material is not None:
+                try:
+                    final_material = original_material.copy()
+                except Exception:
+                    final_material = original_material
+            if final_material is None and hasattr(cleaned_mesh.visual, 'material') and cleaned_mesh.visual.material is not None:
                 final_material = cleaned_mesh.visual.material
+            if final_material is None:
+                final_material = trimesh_loader.visual.material.PBRMaterial()
 
             uv_data = cleaned_mesh.visual.uv if hasattr(cleaned_mesh.visual, 'uv') else None
             if uv_data is None and original_uv is not None and original_uv.shape[0] == cleaned_mesh.vertices.shape[0]:
                 uv_data = original_uv
+            elif uv_data is not None:
+                uv_data = np.array(uv_data, copy=True)
+
+            # If Blender stripped textures, restore them from the original material
+            if original_material is not None:
+                copy_textures(original_material, final_material)
 
             if final_material is not None and uv_data is not None:
                 cleaned_mesh.visual = trimesh_loader.visual.texture.TextureVisuals(uv=uv_data, material=final_material)
@@ -665,3 +685,32 @@ except Exception as e:
             cleaned_mesh.export(final_glb_path, file_type='glb')
 
         return (final_glb_path,)
+
+
+class ImportBlenderGLB:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": ""}),
+                "process": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    RETURN_NAMES = ("trimesh",)
+    FUNCTION = "import_glb"
+    CATEGORY = "Comfy_BlenderTools"
+
+    def import_glb(self, file_path, process):
+        if not file_path:
+            raise ValueError("file_path must be provided for ImportBlenderGLB")
+
+        input_path = file_path
+        if not os.path.isabs(input_path):
+            input_path = os.path.join(folder_paths.get_input_directory(), file_path)
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"GLB file not found: {input_path}")
+
+        mesh = trimesh_loader.load(input_path, force="mesh", process=bool(process))
+        return (mesh,)
