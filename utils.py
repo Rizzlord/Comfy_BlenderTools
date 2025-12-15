@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import shutil
 import trimesh as trimesh_loader
 import folder_paths
 import numpy as np
@@ -20,18 +21,38 @@ def get_blender_path():
     if blender_path:
         print(f"WARNING: BLENDER_EXE environment variable was found, but the path '{blender_path}' is not a valid file.")
     else:
-        print(f"INFO: BLENDER_EXE environment variable not set. Falling back to default path.")
+        print(f"INFO: BLENDER_EXE environment variable not set. Falling back to other detection methods.")
 
+    # Try to find blender in PATH
+    blender_path = shutil.which("blender")
+    if blender_path:
+        print(f"INFO: Found Blender executable in system PATH: {blender_path}")
+        return blender_path
+        
+    # Check common Linux paths
+    if sys.platform.startswith("linux"):
+        common_paths = [
+            "/usr/bin/blender",
+            "/usr/local/bin/blender",
+            "/snap/bin/blender"
+        ]
+        for p in common_paths:
+            if os.path.isfile(p):
+                print(f"INFO: Found Blender executable in common path: {p}")
+                return p
+
+    # Default fallback for Windows (or if nothing else works)
     fallback_path = "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
     
-    if not os.path.isfile(fallback_path):
-        raise FileNotFoundError(
-            f"Blender executable not found at the default path: {fallback_path}. "
-            "Please set the BLENDER_EXE environment variable to the correct path of your blender.exe."
-        )
-    
-    print(f"INFO: Using fallback Blender executable path: {fallback_path}")
-    return fallback_path
+    if os.path.isfile(fallback_path):
+        print(f"INFO: Using fallback Blender executable path: {fallback_path}")
+        return fallback_path
+        
+    raise FileNotFoundError(
+        "Blender executable not found. "
+        "Please set the BLENDER_EXE environment variable to the correct path of your blender.exe, "
+        "or ensure 'blender' is in your system PATH."
+    )
 
 def get_blender_clean_mesh_func_script():
     return """
