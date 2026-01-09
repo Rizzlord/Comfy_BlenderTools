@@ -44,7 +44,8 @@ class MinistryOfFlatUnwrap:
     def unwrap(self, trimesh, texture_resolution, separate_hard_edges, aspect_ratio, use_normals, udims, overlap_identical, overlap_mirrored, world_space_uvs, texture_density, island_margin, refine_with_minimum_stretch, min_stretch_iterations, export_uv_layout):
         mof_exe_path = get_mof_path()
         if not mof_exe_path:
-            print("Ministry of Flat executable not found. Please set the MOF_EXE environment variable.")
+            print("Ministry of Flat executable (UnWrapConsole3.exe) not found. "
+                  "Please ensure it is in the custom node folder or set the MOF_EXE environment variable.")
             empty_image = torch.zeros((1, 1024, 1024, 3), dtype=torch.float32)
             return (trimesh, empty_image)
 
@@ -98,19 +99,11 @@ except Exception as e:
             ]
             
             mof_exe_dir = os.path.dirname(mof_exe_path)
-            result = subprocess.run(
-                command,
-                capture_output=True, text=True,
-                cwd=mof_exe_dir
-            )
-
-            if result.stdout:
-                print(f"Ministry of Flat stdout: {result.stdout}")
-            if result.stderr:
-                print(f"Ministry of Flat stderr: {result.stderr}")
+            _run_mof_command(command, cwd=mof_exe_dir)
 
             if not os.path.exists(mof_output_path) or os.path.getsize(mof_output_path) == 0:
                 raise RuntimeError("Ministry of Flat failed to create an output file. Check logs for details.")
+
 
             post_script_path = os.path.join(temp_dir, "post_clean.py")
             post_script = f"""

@@ -70,22 +70,48 @@ def clean_mesh(obj, merge_distance):
 """
 
 def get_mof_path():
+    # Check for MOF_EXE environment variable
     mof_path = os.environ.get("MOF_EXE")
     if mof_path and os.path.isfile(mof_path):
-        print(f"INFO: Found Ministry of Flat executable via MOF_EXE: {mof_path}")
+        print(f"INFO: Found Ministry of Flat executable via MOF_EXE environment variable: {mof_path}")
         return mof_path
+
+    # Check for UnwrapConsole3.exe in the custom node folder
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try multiple common casings (Linux is case-sensitive)
+    for filename in ["UnWrapConsole3.exe", "UnwrapConsole3.exe"]:
+        local_path = os.path.join(current_dir, filename)
+        if os.path.isfile(local_path):
+            print(f"INFO: Found Ministry of Flat executable in custom node folder: {local_path}")
+            return local_path
     
     return None
 
-def _run_mof_command(command):
+def _run_mof_command(command, cwd=None):
+    # Handle Wine execution for .exe on Linux
+    if sys.platform.startswith("linux") and command[0].lower().endswith(".exe"):
+        # Check if wine is available
+        if not shutil.which("wine"):
+            raise RuntimeError("Wine is required to run Ministry of Flat (UnWrapConsole3.exe) on Linux, but 'wine' was not found in PATH.")
+        
+        # Prepend wine to the command
+        command = ["wine"] + command
+        
     try:
         result = subprocess.run(
             command,
-            check=True, capture_output=True, text=True
+            check=True, capture_output=True, text=True, cwd=cwd
         )
         if result.stdout:
             print(f"Ministry of Flat stdout: {result.stdout}")
     except subprocess.CalledProcessError as e:
+        # Ministry of Flat sometimes returns exit code 1 even on success.
+        # Check if the output indicates success.
+        if e.returncode == 1 and "Saving complete" in e.stdout:
+            print(f"Ministry of Flat finished with exit code 1 (treated as success). Stdout: {e.stdout}")
+            return
+
         error_message = (
             f"Ministry of Flat execution failed with return code {e.returncode}.\n"
             f"--- Stderr ---\n{e.stderr}\n"
@@ -1553,16 +1579,23 @@ class InstantMeshes:
         """Get Instant Meshes executable path from custom node folder"""
         # Get the directory where utils.py is located (custom node folder)
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        hardcoded_path = os.path.join(current_dir, "Instant_Meshes.exe")
         
-        # Check hardcoded path
-        if os.path.isfile(hardcoded_path):
-            print(f"INFO: Found Instant Meshes in custom node folder: {hardcoded_path}")
-            return hardcoded_path
+        # Check for Linux/Mac binary first on non-Windows platforms
+        if sys.platform.startswith("linux") or sys.platform == "darwin":
+            linux_path = os.path.join(current_dir, "Instant_Meshes")
+            if os.path.isfile(linux_path):
+                print(f"INFO: Found Instant Meshes in custom node folder: {linux_path}")
+                return linux_path
+
+        # Check for Windows binary (default for Windows or fallback)
+        exe_path = os.path.join(current_dir, "Instant_Meshes.exe")
+        if os.path.isfile(exe_path):
+            print(f"INFO: Found Instant Meshes in custom node folder: {exe_path}")
+            return exe_path
                 
         raise FileNotFoundError(
-            f"Instant Meshes executable not found at expected location: {hardcoded_path}\n"
-            "Please download Instant_Meshes.exe from https://github.com/wjakob/instant-meshes \n"
+            f"Instant Meshes executable not found in: {current_dir}\n"
+            "Please download Instant_Meshes (Linux/Mac) or Instant_Meshes.exe (Windows) from https://github.com/wjakob/instant-meshes \n"
             "and place it in the custom node folder next to utils.py"
         )
 
