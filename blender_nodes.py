@@ -690,8 +690,8 @@ class ImportBlenderGLB:
             }
         }
 
-    RETURN_TYPES = ("TRIMESH",)
-    RETURN_NAMES = ("trimesh",)
+    RETURN_TYPES = ("TRIMESH", "STRING")
+    RETURN_NAMES = ("trimesh", "glb_path")
     FUNCTION = "import_glb"
     CATEGORY = "Comfy_BlenderTools"
 
@@ -706,4 +706,4 @@ class ImportBlenderGLB:
             raise FileNotFoundError(f"GLB file not found: {input_path}")
 
         mesh = trimesh_loader.load(input_path, force="mesh", process=bool(process))
-        return (mesh,)
+        return (mesh, file_path)
