@@ -33,6 +33,9 @@ app.registerExtension({
 
         const directoryWidget = node.widgets.find(w => w.name === "directory");
         const fileWidget = node.widgets.find(w => w.name === "file");
+        // "preview_model" might be created after this extension runs or before? 
+        // We'll search for it dynamically in updates to be safe, but can try grabbing now
+        // It's defined in python so should exist.
 
         if (!directoryWidget || !fileWidget) {
             console.warn("[BlenderTools] Could not find widgets");
@@ -58,8 +61,8 @@ app.registerExtension({
 
             draw(ctx, node, widget_width, y, widget_height) { },
             computeSize(width) {
-                // Reserve 512px height if renderer exists
-                return [width, this._renderer ? 512 : 0];
+                // Reserve 512px height if renderer exists AND is displayed
+                return [width, (this._renderer && container.style.display !== "none") ? 512 : 0];
             }
         };
 
@@ -185,10 +188,13 @@ app.registerExtension({
             await loadThree();
             if (!THREE || !GLTFLoader || !OrbitControls) return;
 
-            if (!fileWidget.value || fileWidget.value === "None") {
+            // Check Preview Toggle
+            const previewWidget = node.widgets.find(w => w.name === "preview_model");
+            const showPreview = previewWidget ? previewWidget.value : true;
+
+            if (!showPreview || !fileWidget.value || fileWidget.value === "None") {
                 container.style.display = "none";
                 if (widget._renderer) {
-                    // Slight delay to allow layout calc
                     setTimeout(() => { node.setSize(node.computeSize()); }, 10);
                 }
                 return;
@@ -272,32 +278,25 @@ app.registerExtension({
                 const center = box.getCenter(new THREE.Vector3());
                 const size = box.getSize(new THREE.Vector3());
 
-                // 1. Move controls target to the center of the object
                 widget._controls.target.copy(center);
 
-                // 2. Position camera to fit object
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const fov = widget._camera.fov * (Math.PI / 180);
                 let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
 
-                // Add some margin (1.5x)
-                if (cameraZ === 0) cameraZ = 2; // Fallback for point/empty
+                if (cameraZ === 0) cameraZ = 2;
                 cameraZ *= 1.5;
 
-                // Move camera along Z axis relative to center
                 widget._camera.position.set(center.x, center.y, center.z + cameraZ);
-
-                // Update controls
                 widget._controls.update();
 
-                // Apply current render mode
                 setRenderMode(widget._renderMode);
 
                 console.log("[BlenderTools] Model loaded:", fullPath);
                 container.style.display = "block";
 
-                // Resize node to 512 width + fit height
-                const newHeight = node.computeSize([512, 0])[1]; // Pass 512 as tentative width
+                // Resize
+                const newHeight = node.computeSize([512, 0])[1];
                 node.setSize([512, newHeight]);
 
                 updatePosition();
@@ -313,7 +312,11 @@ app.registerExtension({
                 return;
             }
 
-            if (!fileWidget.value || fileWidget.value === "None" || !widget._renderer) {
+            // Check Preview Toggle
+            const previewWidget = node.widgets.find(w => w.name === "preview_model");
+            const showPreview = previewWidget ? previewWidget.value : true;
+
+            if (!showPreview || !fileWidget.value || fileWidget.value === "None" || !widget._renderer) {
                 container.style.display = "none";
                 return;
             }
@@ -325,21 +328,24 @@ app.registerExtension({
             const nodeX = (node.pos[0] + ds.offset[0]) * ds.scale + rect.left;
             const nodeY = (node.pos[1] + ds.offset[1]) * ds.scale + rect.top;
 
-            // Find offset
+            // Calculate offset based on ALL widgets above
             let widgetYAccum = 24; // Header approx
-            let found = false;
+
             for (const w of node.widgets) {
-                if (w === widget) { found = true; break; }
+                if (w === widget) break; // Don't count ourselves
 
                 let h = 20;
                 if (w.computeSize) h = w.computeSize(node.size[0])[1];
                 else if (w.type === "converted-widget") h = (w.options && w.options.height) || 20;
-                widgetYAccum += h + 4;
+
+                widgetYAccum += h + 4; // Add widget height + padding
             }
-            if (!found) return;
+
+            // Add extra spacing as requested by user to avoid overlap
+            widgetYAccum += 15;
 
             const elTop = nodeY + (widgetYAccum * ds.scale);
-            const elH = 512 * ds.scale; // Hardcode 512 height
+            const elH = 512 * ds.scale;
             const elW = (node.size[0] - 20) * ds.scale;
             const elLeft = nodeX + (10 * ds.scale);
 
@@ -364,27 +370,57 @@ app.registerExtension({
 
         node.addCustomWidget(widget);
 
-        node.addWidget("button", "Scan Folder", null, () => {
+        // Scan/Refresh Logic
+        const refreshFiles = (currentValue = null) => {
             const path = directoryWidget.value;
-            if (!path) { alert("Enter path first"); return; }
+            if (!path) return;
+
             api.fetchApi(`/blender_tools/list_models?path=${encodeURIComponent(path)}`)
                 .then(r => r.json())
                 .then(data => {
                     if (data.files?.length) {
                         fileWidget.options.values = data.files;
-                        fileWidget.value = data.files[0];
+
+                        // Persistence Restore Logic
+                        if (currentValue && data.files.includes(currentValue)) {
+                            fileWidget.value = currentValue;
+                        } else if (!fileWidget.value || !data.files.includes(fileWidget.value)) {
+                            fileWidget.value = data.files[0];
+                        }
+
                         updatePreview();
                     } else {
+                        fileWidget.options.values = [""];
+                        fileWidget.value = "";
                         alert("No files found");
                     }
                     node.setDirtyCanvas(true);
                 });
+        };
+
+        node.addWidget("button", "Scan Folder", null, () => {
+            if (!directoryWidget.value) { alert("Enter path first"); return; }
+            refreshFiles();
         });
 
         const originalCallback = fileWidget.callback;
         fileWidget.callback = function (v) {
             if (originalCallback) originalCallback.apply(this, arguments);
             updatePreview();
+        };
+
+        // --- Persistence / Restoration Hook ---
+        const onConfigure = node.onConfigure;
+        node.onConfigure = function (w) {
+            if (onConfigure) onConfigure.apply(this, arguments);
+            // After configuration, widgets have their values.
+            // Trigger scan if directory is set.
+            setTimeout(() => {
+                const currentFile = fileWidget.value;
+                if (directoryWidget.value) {
+                    refreshFiles(currentFile);
+                }
+            }, 50);
         };
     },
 });

@@ -687,6 +687,7 @@ class BlenderLoadModel:
             "required": {
                 "directory": ("STRING", {"default": ""}),
                 "file": ([""],),
+                "preview_model": ("BOOLEAN", {"default": True}),
                 "process": ("BOOLEAN", {"default": False}),
             }
         }
