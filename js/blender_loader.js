@@ -41,6 +41,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         _lights: [],
         _animationId: null,
         _renderMode: 'original',
+        _renderQuality: 1024, // Default resolution height
         _originalMaterials: new Map(),
 
         draw(ctx, node, widget_width, y, widget_height) { },
@@ -98,6 +99,34 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     toolbar.appendChild(createButton("Original", "original"));
     toolbar.appendChild(createButton("Normal", "normal"));
     toolbar.appendChild(createButton("Wireframe", "wireframe"));
+
+    // Resolution Dropdown
+    const resSelect = document.createElement("select");
+    Object.assign(resSelect.style, {
+        fontSize: "10px",
+        backgroundColor: "#444",
+        color: "#eee",
+        border: "1px solid #555",
+        borderRadius: "3px",
+        cursor: "pointer",
+        marginLeft: "5px"
+    });
+
+    [256, 512, 1024].forEach(res => {
+        const opt = document.createElement("option");
+        opt.value = res;
+        opt.textContent = res + "px";
+        if (res === 1024) opt.selected = true;
+        resSelect.appendChild(opt);
+    });
+
+    resSelect.onchange = (e) => {
+        widget._renderQuality = parseInt(e.target.value);
+        if (widget._renderer) {
+            updatePosition(); // Force resize
+        }
+    };
+    toolbar.appendChild(resSelect);
 
     // Brightness Slider
     const sliderContainer = document.createElement("div");
@@ -213,11 +242,25 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         container.style.height = `${elH}px`;
 
         container.style.display = "block";
-        if (widget._renderer.domElement.width !== Math.floor(elW) ||
-            widget._renderer.domElement.height !== Math.floor(elH)) {
-            widget._renderer.setSize(elW, elH);
-            widget._camera.aspect = elW / elH;
-            widget._camera.updateProjectionMatrix();
+
+        // Quality Logic
+        if (widget._renderer) {
+            const aspect = elW / elH;
+            const targetH = widget._renderQuality || 512;
+            const targetW = targetH * aspect;
+
+            // Check if resize needed (approximate)
+            const currentSize = new THREE.Vector2();
+            widget._renderer.getSize(currentSize);
+
+            // Allow 1px variance to avoid float jitter loops
+            if (Math.abs(currentSize.y - targetH) > 1 || Math.abs(currentSize.x - targetW) > 1) {
+                widget._renderer.setSize(targetW, targetH, false); // false = updateStyle: false (keep CSS size)
+                widget._renderer.domElement.style.width = "100%";
+                widget._renderer.domElement.style.height = "100%";
+                widget._camera.aspect = aspect;
+                widget._camera.updateProjectionMatrix();
+            }
         }
     };
 
