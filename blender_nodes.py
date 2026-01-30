@@ -720,9 +720,11 @@ class BlenderPreview3D:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
+            "required": {},
+            "optional": {
                 "trimesh": ("TRIMESH",),
-            },
+                "glb_path": ("STRING", {"default": "", "multiline": False}),
+            }
         }
 
     RETURN_TYPES = ()
@@ -730,27 +732,52 @@ class BlenderPreview3D:
     CATEGORY = "Comfy_BlenderTools"
     OUTPUT_NODE = True
 
-    def preview_model(self, trimesh):
+    def preview_model(self, trimesh=None, glb_path=None):
         import random
         import string
         
-        # Ensure temp directory exists
-        temp_dir = folder_paths.get_temp_directory()
-        os.makedirs(temp_dir, exist_ok=True)
+        print(f"BlenderPreview3D: Executing. Trimesh present: {trimesh is not None}, GLB Path: '{glb_path}'")
         
-        # Generate unique filename
-        random_name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        filename = f"blender_preview_{random_name}.glb"
-        filepath = os.path.join(temp_dir, filename)
+        final_path = ""
         
-        # Export logic (reusing BlenderExportGLB pattern or direct trimesh export if simple)
-        # Since we just want a preview, direct trimesh export is fastest and should be sufficient for the viewer.
-        # However, to ensure it looks exactly like the Blender output (e.g. if colors/materials are complex),
-        # we might want to use the same logic. But trimesh.export is robust for standard visualization.
-        # User accepted "Export trimesh to GLB".
-        
-        trimesh.export(filepath)
-        
+        # Priority 1: Trimesh (Dynamic visualization)
+        if trimesh is not None:
+            # Ensure temp directory exists
+            temp_dir = folder_paths.get_temp_directory()
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Generate unique filename
+            random_name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            filename = f"blender_preview_{random_name}.glb"
+            filepath = os.path.join(temp_dir, filename)
+            
+            trimesh.export(filepath)
+            final_path = filepath
+            print(f"BlenderPreview3D: Exported trimesh to {final_path}")
+            
+        # Priority 2: GLB Path (Static/Cached visualization)
+        elif glb_path and glb_path.strip():
+            # Try to resolve path if it's just a filename
+            potential_paths = [
+                glb_path,
+                os.path.join(folder_paths.get_output_directory(), glb_path),
+                os.path.join(folder_paths.get_input_directory(), glb_path),
+                os.path.join(folder_paths.get_temp_directory(), glb_path)
+            ]
+            
+            resolved_path = ""
+            for p in potential_paths:
+                if os.path.exists(p) and os.path.isfile(p):
+                    resolved_path = p
+                    break
+            
+            if resolved_path:
+                final_path = resolved_path
+                print(f"BlenderPreview3D: Resolved GLB path to: {final_path}")
+            else:
+                final_path = glb_path # Fallback to original
+                print(f"BlenderPreview3D: Could not resolve path '{glb_path}', passing as-is.")
+            
         return {
-            "ui": {"glb_path": [filepath]},
+            "ui": {"glb_path": [final_path]},
         }
