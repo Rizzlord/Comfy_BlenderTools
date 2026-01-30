@@ -680,30 +680,36 @@ except Exception as e:
         return (final_glb_path,)
 
 
-class ImportBlenderGLB:
+class BlenderLoadModel:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "file_path": ("STRING", {"default": ""}),
+                "directory": ("STRING", {"default": ""}),
+                "file": ([""],),
                 "process": ("BOOLEAN", {"default": False}),
             }
         }
 
+    @classmethod
+    def VALIDATE_INPUTS(s, **kwargs):
+        return True
+
     RETURN_TYPES = ("TRIMESH", "STRING")
-    RETURN_NAMES = ("trimesh", "glb_path")
-    FUNCTION = "import_glb"
+    RETURN_NAMES = ("trimesh", "model_path")
+    FUNCTION = "load_model"
     CATEGORY = "Comfy_BlenderTools"
 
-    def import_glb(self, file_path, process):
-        if not file_path:
-            raise ValueError("file_path must be provided for ImportBlenderGLB")
+    def load_model(self, directory, file, process):
+        if not directory:
+             raise ValueError("Directory must be provided.")
+        if not file:
+             raise ValueError("File must be selected.")
+             
+        model_path = os.path.join(directory, file)
+        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        input_path = file_path
-        if not os.path.isabs(input_path):
-            input_path = os.path.join(folder_paths.get_input_directory(), file_path)
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"GLB file not found: {input_path}")
-
-        mesh = trimesh_loader.load(input_path, force="mesh", process=bool(process))
-        return (mesh, file_path)
+        mesh = trimesh_loader.load(model_path, force="mesh", process=bool(process))
+        return (mesh, model_path)

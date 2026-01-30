@@ -3,8 +3,12 @@ from .blender_nodes import (
     BlenderUnwrap,
     MinistryOfFlatUnwrap,
     BlenderExportGLB,
-    ImportBlenderGLB,
+    BlenderExportGLB,
+    BlenderLoadModel,
 )
+from server import PromptServer
+from aiohttp import web
+import os
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
 from .utils import (
     Voxelize,
@@ -44,7 +48,7 @@ NODE_CLASS_MAPPINGS = {
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
-    "ImportBlenderGLB": ImportBlenderGLB,
+    "BlenderLoadModel": BlenderLoadModel,
     "Voxelize": Voxelize,
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
@@ -79,7 +83,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
-    "ImportBlenderGLB": "Import Blender GLB",
+    "BlenderLoadModel": "Blender Load Model",
     "Voxelize": "Blender Remesh",
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",
@@ -106,4 +110,31 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GS_PlyToMesh": "GS Ply To Mesh",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+
+WEB_DIRECTORY = "./js"
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+@PromptServer.instance.routes.get("/blender_tools/list_models")
+async def list_models(request):
+    if "path" not in request.rel_url.query:
+        return web.json_response({"error": "path not provided"}, status=400)
+    
+    path = request.rel_url.query["path"]
+    
+    if not os.path.exists(path) or not os.path.isdir(path):
+         return web.json_response({"files": []})
+         
+    files = [f for f in os.listdir(path) if f.lower().endswith(('.glb', '.obj', '.fbx', '.ply'))]
+    return web.json_response({"files": sorted(files)})
+
+@PromptServer.instance.routes.get("/blender_tools/view_model")
+async def view_model(request):
+    if "path" not in request.rel_url.query:
+        return web.json_response({"error": "path not provided"}, status=400)
+        
+    path = request.rel_url.query["path"]
+    
+    if not os.path.exists(path) or not os.path.isfile(path):
+        return web.json_response({"error": "File not found"}, status=404)
+        
+    return web.FileResponse(path)
