@@ -508,36 +508,66 @@ app.registerExtension({
     async nodeCreated(node) {
         if (node.comfyClass !== "BlenderPreview3D") return;
 
-        loadThree();
+        await loadThree();
         const widget = create3DPreviewWidget(node);
 
-        // Initial "Empty" state
-        // widget.loadModel(null, true); 
+        // state persistence helper
+        const loadFromState = () => {
+            const glbWidget = node.widgets ? node.widgets.find(w => w.name === "glb_path") : null;
+
+            // 1. Try widget value
+            if (glbWidget && glbWidget.value) {
+                widget.loadModel(glbWidget.value, true);
+                return;
+            }
+
+            // 2. Try localStorage cache (persists across reloads without save)
+            const cachedPath = localStorage.getItem(`Comfy.BlenderTools.PreviewCache.${node.id}`);
+            if (cachedPath) {
+                widget.loadModel(cachedPath, true);
+                return;
+            }
+
+            // 3. Empty
+            widget.loadModel(null, true);
+        };
+
+        // Listen for widget changes
+        const glbWidget = node.widgets ? node.widgets.find(w => w.name === "glb_path") : null;
+        if (glbWidget) {
+            const originalCallback = glbWidget.callback;
+            glbWidget.callback = function (v) {
+                if (originalCallback) originalCallback.apply(this, arguments);
+                widget.loadModel(v, true);
+                // Update cache too? maybe not needed if widget persists naturally
+            };
+        }
 
         const onExecuted = node.onExecuted;
         node.onExecuted = function (message) {
             if (onExecuted) onExecuted.apply(this, arguments);
             if (message && message.glb_path) {
                 const path = message.glb_path[0];
-                widget.loadModel(path, true); // true = always show
+                widget.loadModel(path, true);
+
+                // Persist execution result to localStorage
+                localStorage.setItem(`Comfy.BlenderTools.PreviewCache.${node.id}`, path);
             } else {
-                console.log("Model not found");
-                widget.loadModel(null, true);
+                console.log("Model not found in execution output");
             }
         };
 
-        // Check for cached/persisted data (if any basic string widget was used, but here input comes from another node)
-        // Since input comes from execution, we don't really have a "value" to restore unless we store the last execution result.
-        // But 3D viewer state isn't typically serialized in graph.
-        // User asked "use the cache function to load the models if not there print out model not found"
-        // This implies they expect it to survive refresh if possible. 
-        // ComfyUI doesn't auto-cache execution outputs on frontend refresh usually.
-        // But we can try to initialize.
+        const onConfigure = node.onConfigure;
+        node.onConfigure = function () {
+            if (onConfigure) onConfigure.apply(this, arguments);
+            setTimeout(() => {
+                loadFromState();
+            }, 100);
+        };
 
-        // Wait for connection? No, this is an output node effectively.
-        // We will just init it empty but visible.
+        // Initial load
         setTimeout(() => {
-            widget.loadModel(null, true);
+            loadFromState();
         }, 100);
     }
 });
