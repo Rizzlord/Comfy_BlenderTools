@@ -701,7 +701,7 @@ class BlenderLoadModel:
     FUNCTION = "load_model"
     CATEGORY = "Comfy_BlenderTools"
 
-    def load_model(self, directory, file, process):
+    def load_model(self, directory, file, process, preview_model=True):
         if not directory:
              raise ValueError("Directory must be provided.")
         if not file:
@@ -714,3 +714,43 @@ class BlenderLoadModel:
 
         mesh = trimesh_loader.load(model_path, force="mesh", process=bool(process))
         return (mesh, model_path)
+
+
+class BlenderPreview3D:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "preview_model"
+    CATEGORY = "Comfy_BlenderTools"
+    OUTPUT_NODE = True
+
+    def preview_model(self, trimesh):
+        import random
+        import string
+        
+        # Ensure temp directory exists
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Generate unique filename
+        random_name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        filename = f"blender_preview_{random_name}.glb"
+        filepath = os.path.join(temp_dir, filename)
+        
+        # Export logic (reusing BlenderExportGLB pattern or direct trimesh export if simple)
+        # Since we just want a preview, direct trimesh export is fastest and should be sufficient for the viewer.
+        # However, to ensure it looks exactly like the Blender output (e.g. if colors/materials are complex),
+        # we might want to use the same logic. But trimesh.export is robust for standard visualization.
+        # User accepted "Export trimesh to GLB".
+        
+        trimesh.export(filepath)
+        
+        return {
+            "ui": {"glb_path": [filepath]},
+        }

@@ -3,8 +3,8 @@ from .blender_nodes import (
     BlenderUnwrap,
     MinistryOfFlatUnwrap,
     BlenderExportGLB,
-    BlenderExportGLB,
     BlenderLoadModel,
+    BlenderPreview3D,
 )
 from server import PromptServer
 from aiohttp import web
@@ -49,6 +49,7 @@ NODE_CLASS_MAPPINGS = {
     "ExtractMaterial": ExtractMaterial,
     "BlenderExportGLB": BlenderExportGLB,
     "BlenderLoadModel": BlenderLoadModel,
+    "BlenderPreview3D": BlenderPreview3D,
     "Voxelize": Voxelize,
     "VoxelSettings": VoxelSettings,
     "OtherModesSettings": OtherModesSettings,
@@ -84,6 +85,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ExtractMaterial": "Extract Material",
     "BlenderExportGLB": "Blender Export GLB",
     "BlenderLoadModel": "Blender Load Model",
+    "BlenderPreview3D": "Blender Preview 3D",
     "Voxelize": "Blender Remesh",
     "VoxelSettings": "Remesh Voxel Settings",
     "OtherModesSettings": "Remesh Other Settings",
