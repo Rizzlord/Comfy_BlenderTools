@@ -175,9 +175,7 @@ class BlenderDecimate:
                 "iterations": ("INT", {"default": 2, "min": 0, "max": 16}),
                 "triangulate": ("BOOLEAN", {"default": True}),
                 "use_symmetry": ("BOOLEAN", {"default": False}),
-                "symmetry_axis_x": ("BOOLEAN", {"default": True}),
-                "symmetry_axis_y": ("BOOLEAN", {"default": False}),
-                "symmetry_axis_z": ("BOOLEAN", {"default": False}),
+                "symmetry_axis": (["X", "Y", "Z"], {"default": "X"}),
                 "merge_distance": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
             }
         }
@@ -186,7 +184,7 @@ class BlenderDecimate:
     FUNCTION = "decimate"
     CATEGORY = "Comfy_BlenderTools"
 
-    def decimate(self, trimesh, method, max_face_count, iterations, triangulate, use_symmetry, symmetry_axis_x, symmetry_axis_y, symmetry_axis_z, merge_distance):
+    def decimate(self, trimesh, method, max_face_count, iterations, triangulate, use_symmetry, symmetry_axis, merge_distance):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
@@ -201,7 +199,7 @@ class BlenderDecimate:
                 'i': input_mesh_path, 'o': output_mesh_path, 'method': method,
                 'ratio': min(1.0, ratio), 'iters': iterations,
                 'tri': triangulate, 'use_sym': use_symmetry,
-                'sym_x': symmetry_axis_x, 'sym_y': symmetry_axis_y, 'sym_z': symmetry_axis_z,
+                'sym_axis': symmetry_axis,
                 'merge_dist': merge_distance
             }
 
@@ -214,7 +212,7 @@ p = {{
     'i': r"{params['i']}", 'o': r"{params['o']}", 'method': "{params['method']}",
     'ratio': {params['ratio']}, 'iters': {params['iters']},
     'tri': {params['tri']}, 'use_sym': {params['use_sym']},
-    'sym_x': {params['sym_x']}, 'sym_y': {params['sym_y']}, 'sym_z': {params['sym_z']},
+    'sym_axis': "{params['sym_axis']}",
     'merge_dist': {params['merge_dist']}
 }}
 try:
@@ -245,11 +243,7 @@ try:
         mod.use_collapse_triangulate = p['tri']
         if p['use_sym']:
             mod.use_symmetry = True
-            axis = ''
-            if p['sym_x']: axis = 'X'
-            elif p['sym_y']: axis = 'Y'
-            elif p['sym_z']: axis = 'Z'
-            if axis: mod.symmetry_axis = axis
+            mod.symmetry_axis = p['sym_axis']
         apply_modifier = True
 
     elif p['method'] == 'Un-Subdivide' and p['iters'] > 0:

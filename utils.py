@@ -899,7 +899,7 @@ class MirrorMesh:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "axis": (["X", "Y", "Z"], {"default": "X"}),
+                "axis": (["X", "Y", "Z", "Z-"], {"default": "X"}),
                 "use_clip": ("BOOLEAN", {"default": True}),
                 "use_merge": ("BOOLEAN", {"default": True}),
                 "merge_threshold": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
@@ -913,7 +913,8 @@ class MirrorMesh:
     def mirror(self, trimesh, axis, use_clip, use_merge, merge_threshold):
         axis_x = axis == "X"
         axis_y = axis == "Y"
-        axis_z = axis == "Z"
+        axis_z = axis in ["Z", "Z-"]
+        flip_z = axis == "Z-"
 
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
@@ -924,6 +925,7 @@ class MirrorMesh:
 
             params = {
                 'axis_x': axis_x, 'axis_y': axis_y, 'axis_z': axis_z,
+                'flip_z': flip_z,
                 'use_clip': use_clip, 'use_merge': use_merge,
                 'merge_threshold': merge_threshold,
             }
@@ -953,7 +955,8 @@ try:
     if p['axis_y']:
         bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(0, 1, 0), clear_outer=True)
     if p['axis_z']:
-        bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(0, 0, 1), clear_outer=True)
+        normal_z = -1 if p['flip_z'] else 1
+        bpy.ops.mesh.bisect(plane_co=(0, 0, 0), plane_no=(0, 0, normal_z), clear_outer=True)
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
