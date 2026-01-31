@@ -616,6 +616,15 @@ class SmoothMesh:
     CATEGORY = "Comfy_BlenderTools/Utils"
 
     def smooth(self, trimesh, factor, repeat, axis_x, axis_y, axis_z, merge_distance):
+        original_material = None
+        original_uv = None
+        if hasattr(trimesh, "visual"):
+            if hasattr(trimesh.visual, "material") and trimesh.visual.material is not None:
+                mat = trimesh.visual.material
+                original_material = mat.copy() if hasattr(mat, "copy") else mat
+            if hasattr(trimesh.visual, "uv") and trimesh.visual.uv is not None:
+                original_uv = np.array(trimesh.visual.uv, copy=True)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
@@ -890,9 +899,7 @@ class MirrorMesh:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "axis_x": ("BOOLEAN", {"default": True}),
-                "axis_y": ("BOOLEAN", {"default": False}),
-                "axis_z": ("BOOLEAN", {"default": False}),
+                "axis": (["X", "Y", "Z"], {"default": "X"}),
                 "use_clip": ("BOOLEAN", {"default": True}),
                 "use_merge": ("BOOLEAN", {"default": True}),
                 "merge_threshold": ("FLOAT", {"default": 0.0001, "min": 0.0, "max": 1.0, "step": 0.0001, "display": "number"}),
@@ -903,7 +910,11 @@ class MirrorMesh:
     FUNCTION = "mirror"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def mirror(self, trimesh, axis_x, axis_y, axis_z, use_clip, use_merge, merge_threshold):
+    def mirror(self, trimesh, axis, use_clip, use_merge, merge_threshold):
+        axis_x = axis == "X"
+        axis_y = axis == "Y"
+        axis_z = axis == "Z"
+
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "i.glb")
             output_mesh_path = os.path.join(temp_dir, "o.glb")
