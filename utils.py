@@ -57,16 +57,17 @@ def get_blender_path():
 def get_blender_clean_mesh_func_script():
     return """
 def clean_mesh(obj, merge_distance):
-    import bpy
+    import bpy, bmesh
+    if merge_distance > 0.0:
+        bpy.ops.object.mode_set(mode='EDIT')
+        bm = bmesh.from_edit_mesh(obj.data)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_distance)
+        bmesh.update_edit_mesh(obj.data)
+        bpy.ops.object.mode_set(mode='OBJECT')
+    
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    if merge_distance > 0.0:
-        bpy.ops.mesh.remove_doubles(threshold=merge_distance)
-
-    bpy.ops.object.mode_set(mode='OBJECT')
 """
 
 def get_mof_path():
@@ -1045,11 +1046,13 @@ try:
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
 
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
     if p['merge_distance'] > 0.0:
-        bpy.ops.mesh.remove_doubles(threshold=p['merge_distance'])
-    bpy.ops.object.mode_set(mode='OBJECT')
+        import bmesh
+        bpy.ops.object.mode_set(mode='EDIT')
+        bm = bmesh.from_edit_mesh(obj.data)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=p['merge_distance'])
+        bmesh.update_edit_mesh(obj.data)
+        bpy.ops.object.mode_set(mode='OBJECT')
 
     mod = obj.modifiers.new(name="Subdivision", type='SUBSURF')
     mod.subdivision_type = 'CATMULL_CLARK'

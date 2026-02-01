@@ -226,7 +226,7 @@ class TextureBake:
 {clean_mesh_func_script}
 import sys, traceback
 try:
-    import bpy, os, numpy as np
+    import bpy, os, bmesh, numpy as np
 except Exception as e:
     print(f"Failed to import Blender dependencies: {{e}}", file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
@@ -476,10 +476,11 @@ def sanitize_for_bake(obj, merge_distance):
 
     try:
         bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
         if merge_distance > 0.0:
             try:
-                bpy.ops.mesh.merge_by_distance(distance=merge_distance)
+                bm = bmesh.from_edit_mesh(obj.data)
+                bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_distance)
+                bmesh.update_edit_mesh(obj.data)
             except Exception as exc_merge:
                 print(f"Merge by distance failed: {{exc_merge}}")
         try:
