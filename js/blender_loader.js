@@ -163,6 +163,22 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     sliderContainer.appendChild(slider);
     toolbar.appendChild(sliderContainer);
 
+    // Stats Overlay
+    const statsOverlay = document.createElement("div");
+    Object.assign(statsOverlay.style, {
+        position: "absolute",
+        top: "5px",
+        right: "5px",
+        zIndex: "20",
+        color: "rgba(255, 255, 255, 0.7)",
+        fontSize: "11px",
+        textAlign: "right",
+        pointerEvents: "none",
+        fontFamily: "monospace",
+        textShadow: "1px 1px 2px black"
+    });
+    container.appendChild(statsOverlay);
+
     // --- Cleanup ---
     const onRemoved = node.onRemoved;
     node.onRemoved = function () {
@@ -376,16 +392,56 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             widget._model = gltf.scene;
             widget._originalMaterials.clear();
 
+            let totalVertices = 0;
+            let totalFaces = 0;
+
             widget._model.traverse((child) => {
                 if (child.isMesh) {
                     widget._originalMaterials.set(child.uuid, child.material);
-                    if (child.geometry && !child.geometry.attributes.normal) {
-                        child.geometry.computeVertexNormals();
+                    if (child.geometry) {
+                        // Ensure normals exist
+                        if (!child.geometry.attributes.normal) {
+                            child.geometry.computeVertexNormals();
+                        }
+
+                        // Stats counting
+                        const geom = child.geometry;
+                        if (geom.attributes.position) {
+                            totalVertices += geom.attributes.position.count;
+                        }
+                        if (geom.index) {
+                            totalFaces += geom.index.count / 3;
+                        } else if (geom.attributes.position) {
+                            totalFaces += geom.attributes.position.count / 3;
+                        }
                     }
                 }
             });
 
             widget._scene.add(widget._model);
+
+            // Fetch File Size (HEAD request)
+            fetch(url, { method: "HEAD" })
+                .then(res => {
+                    const len = res.headers.get("Content-Length");
+                    let sizeStr = "? MB";
+                    if (len) {
+                        const mb = parseInt(len) / (1024 * 1024);
+                        sizeStr = mb.toFixed(2) + " MB";
+                    }
+                    updateStatsUI(totalVertices, totalFaces, sizeStr);
+                })
+                .catch(() => {
+                    updateStatsUI(totalVertices, totalFaces, "? MB");
+                });
+
+            const updateStatsUI = (v, f, s) => {
+                statsOverlay.innerHTML = `
+                    <div>Verts: ${v.toLocaleString()}</div>
+                    <div>Faces: ${f.toLocaleString()}</div>
+                    <div>Size: ${s}</div>
+                `;
+            };
 
             // Centering
             const box = new THREE.Box3().setFromObject(widget._model);
