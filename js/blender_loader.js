@@ -46,7 +46,8 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         draw(ctx, node, widget_width, y, widget_height) { },
         computeSize(width) {
-            return [width, (this._renderer && container.style.display !== "none") ? 512 : 0];
+            if (!this._renderer || container.style.display === "none") return [width, 0];
+            return [width, 200];
         }
     };
 
@@ -217,12 +218,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             return;
         }
 
-        // Only check toggle if it exists (for Load Model node)
         const previewWidget = node.widgets.find(w => w.name === "preview_model");
         const showPreview = previewWidget ? previewWidget.value : true;
 
-        // if hidden or no renderer
-        if (!showPreview || container.style.display === "none" || !widget._renderer) {
+        if (!showPreview || !widget._renderer) {
             container.style.display = "none";
             return;
         }
@@ -234,7 +233,6 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         const nodeX = (node.pos[0] + ds.offset[0]) * ds.scale + rect.left;
         const nodeY = (node.pos[1] + ds.offset[1]) * ds.scale + rect.top;
 
-        // Calculate offset 
         let widgetYAccum = 24;
         for (const w of node.widgets) {
             if (w === widget) break;
@@ -248,8 +246,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         widgetYAccum += 15;
 
+        const availableH = Math.max(200, node.size[1] - widgetYAccum);
+
         const elTop = nodeY + (widgetYAccum * ds.scale);
-        const elH = 512 * ds.scale;
+        const elH = availableH * ds.scale;
         const elW = (node.size[0] - 20) * ds.scale;
         const elLeft = nodeX + (10 * ds.scale);
 
@@ -259,19 +259,16 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         container.style.display = "block";
 
-        // Quality Logic
         if (widget._renderer) {
             const aspect = elW / elH;
             const targetH = widget._renderQuality || 512;
             const targetW = targetH * aspect;
 
-            // Check if resize needed (approximate)
             const currentSize = new THREE.Vector2();
             widget._renderer.getSize(currentSize);
 
-            // Allow 1px variance to avoid float jitter loops
             if (Math.abs(currentSize.y - targetH) > 1 || Math.abs(currentSize.x - targetW) > 1) {
-                widget._renderer.setSize(targetW, targetH, false); // false = updateStyle: false (keep CSS size)
+                widget._renderer.setSize(targetW, targetH, false);
                 widget._renderer.domElement.style.width = "100%";
                 widget._renderer.domElement.style.height = "100%";
                 widget._camera.aspect = aspect;
@@ -284,6 +281,26 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     node.onDrawBackground = function (ctx) {
         if (originalDraw) originalDraw.apply(this, arguments);
         updatePosition();
+    };
+
+    let lastTrackedW = node.size[0];
+    let lastTrackedH = node.size[1];
+
+    let posTrackingId = null;
+    const trackPosition = () => {
+        if (!node.graph || !document.body.contains(container)) {
+            if (posTrackingId) cancelAnimationFrame(posTrackingId);
+            return;
+        }
+        updatePosition();
+        posTrackingId = requestAnimationFrame(trackPosition);
+    };
+    posTrackingId = requestAnimationFrame(trackPosition);
+
+    const origOnRemoved = node.onRemoved;
+    node.onRemoved = function () {
+        if (posTrackingId) cancelAnimationFrame(posTrackingId);
+        if (origOnRemoved) origOnRemoved.apply(this, arguments);
     };
 
     // Exposed method to load model
@@ -373,11 +390,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             animate();
         }
 
-        // If we really don't have a path (and alwaysShow is true), just ensure layout and exit
         if (!fullPath) {
             container.style.display = "block";
-            const newHeight = node.computeSize([512, 0])[1];
-            node.setSize([512, newHeight]);
+            // Do NOT reset size here. If LiteGraph loaded a saved size, keep it.
+            // If it's a new node, it will have the default dimensions automatically.
             updatePosition();
             return;
         }
@@ -463,10 +479,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
             container.style.display = "block";
 
-            // Resize Node
-            const newHeight = node.computeSize([512, 0])[1];
-            node.setSize([512, newHeight]);
-
+            // Same here, don't force size. Let user size persist natively.
             updatePosition();
 
         }, undefined, (e) => {
