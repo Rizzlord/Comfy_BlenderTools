@@ -8,7 +8,7 @@ import folder_paths
 import numpy as np
 import torch
 import uuid
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import pymeshlab
 
 def get_blender_path():
@@ -58,16 +58,17 @@ def get_blender_clean_mesh_func_script():
     return """
 def clean_mesh(obj, merge_distance):
     import bpy, bmesh
+    
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    
     if merge_distance > 0.0:
         bpy.ops.object.mode_set(mode='EDIT')
         bm = bmesh.from_edit_mesh(obj.data)
         bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=merge_distance)
         bmesh.update_edit_mesh(obj.data)
         bpy.ops.object.mode_set(mode='OBJECT')
-    
-    bpy.ops.object.select_all(action='DESELECT')
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
 """
 
 def get_mof_path():
@@ -2621,3 +2622,154 @@ except Exception as e:
             batched_images = torch.cat((material_img, wireframe_img, normal_img), 0)
 
             return (batched_images,)
+
+class BlenderUVPack:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trimesh": ("TRIMESH",),
+                "island_spacing": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 1.0}),
+                "minimize_stretch": ("BOOLEAN", {"default": True}),
+                "stretch_iterations": ("INT", {"default": 10, "min": 1, "max": 100}),
+                "rotate_islands": ("BOOLEAN", {"default": True}),
+                "margin_method": (["SCALED", "ADD", "FRACTION"], {"default": "SCALED"}),
+                "shape_method": (["CONCAVE", "CONVEX", "AABB"], {"default": "CONCAVE"}),
+                "texture_resolution": ("INT", {"default": 1024, "min": 256, "max": 8192, "step": 256}),
+                "export_uv_layout": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH", "IMAGE")
+    RETURN_NAMES = ("trimesh", "uv_preview")
+    FUNCTION = "pack"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
+        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
+        if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
+            img = Image.new('RGB', (res_x, res_y), 'black')
+            draw = ImageDraw.Draw(img)
+            if mesh.faces.shape[1] == 3:
+                for face in mesh.faces:
+                    points = [(mesh.visual.uv[i][0] * res_x, (1 - mesh.visual.uv[i][1]) * res_y) for i in face]
+                    points.append(points[0])
+                    draw.line(points, fill='white', width=1)
+            uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+        return uv_layout_image
+
+    def pack(self, trimesh, island_spacing, minimize_stretch, stretch_iterations, rotate_islands, margin_method="SCALED", shape_method="CONCAVE", texture_resolution=1024, export_uv_layout=True):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_mesh_path = os.path.join(temp_dir, "input.obj")
+            output_mesh_path = os.path.join(temp_dir, "output.obj")
+            script_path = os.path.join(temp_dir, "pack_script.py")
+            
+            trimesh.export(input_mesh_path)
+
+            # Convert spacing to Blender margin (normalized for 2048 resolution)
+            margin_val = island_spacing / 2048.0
+            
+            params = {
+                'margin': margin_val,
+                'minimize_stretch': minimize_stretch,
+                'stretch_iterations': stretch_iterations,
+                'rotate_islands': rotate_islands,
+                'margin_method': margin_method.upper(),
+                'shape_method': shape_method.upper(),
+                'input_mesh': input_mesh_path,
+                'output_mesh': output_mesh_path
+            }
+            
+            script_params = {k: repr(v) for k, v in params.items()}
+
+            script = f"""
+import bpy, sys, traceback
+
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    
+    # Import OBJ (Blender 4.0/5.0+ or fallback)
+    if hasattr(bpy.ops.wm, "obj_import"):
+        bpy.ops.wm.obj_import(filepath=p['input_mesh'])
+    else:
+        bpy.ops.import_scene.obj(filepath=p['input_mesh'])
+
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj:
+        raise Exception("No mesh found after import")
+        
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    # Sync selection for UV operations
+    bpy.context.scene.tool_settings.use_uv_select_sync = True
+
+    bpy.ops.object.mode_set(mode='EDIT')
+    bpy.ops.mesh.select_all(action='SELECT')
+    
+    # 1. Protect UV boundaries: Mark seams from existing islands before welding
+    bpy.ops.uv.seams_from_islands()
+    
+    # 2. Merge by distance to fix the "every face is an island" issue
+    bpy.ops.mesh.remove_doubles(threshold=0.0001)
+    
+    # 3. Recalculate Normals & Reset Vectors (custom normals) for clean lighting
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    try:
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+    except:
+        pass
+    
+    # 4. Optional Minimize Stretch
+    if p['minimize_stretch']:
+        bpy.ops.uv.minimize_stretch(iterations=p['stretch_iterations'], fill_holes=True, blend=1.0)
+    
+    # 5. Pack Islands
+    bpy.ops.uv.pack_islands(
+        shape_method=p['shape_method'],
+        rotate=p['rotate_islands'],
+        rotate_method='ANY',
+        scale=True,
+        margin_method=p['margin_method'],
+        margin=p['margin'],
+        udim_source='ACTIVE_UDIM'
+    )
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.shade_smooth()
+
+    # Export back as OBJ
+    if hasattr(bpy.ops.wm, "obj_export"):
+        bpy.ops.wm.obj_export(filepath=p['output_mesh'], export_selected_objects=True, export_uv=True)
+    else:
+        bpy.ops.export_scene.obj(filepath=p['output_mesh'], use_selection=True)
+
+    sys.exit(0)
+
+except Exception as e:
+    print(f"Blender UV Pack script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+            
+            _run_blender_script(script_path)
+            
+            if os.path.exists(output_mesh_path):
+                packed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+                
+                # Preserve original material if exists
+                if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
+                    if not hasattr(packed_mesh, 'visual'):
+                        packed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
+                    packed_mesh.visual.material = trimesh.visual.material
+                    
+                uv_preview = self.generate_uv_preview(packed_mesh, texture_resolution, texture_resolution, export_uv_layout)
+                return (packed_mesh, uv_preview)
+            
+            print("Warning: Blender UV packing failed, returning original mesh.")
+            uv_preview = self.generate_uv_preview(trimesh, texture_resolution, texture_resolution, export_uv_layout)
+            return (trimesh, uv_preview)

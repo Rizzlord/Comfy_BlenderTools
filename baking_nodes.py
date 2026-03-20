@@ -7,7 +7,7 @@ import folder_paths
 import numpy as np
 import torch
 import re
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageDraw
 from .utils import _run_blender_script, get_blender_clean_mesh_func_script
 
 
@@ -1013,15 +1013,32 @@ class ExtractMaterial:
         return {
             "required": {
                 "mesh": ("TRIMESH",),
+            },
+            "optional": {
+                "texture_resolution": ("INT", {"default": 1024, "min": 256, "max": 8192, "step": 256}),
+                "export_uv_layout": ("BOOLEAN", {"default": True}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("albedo_map", "normal_map", "mr_map", "ao_map")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("albedo_map", "normal_map", "mr_map", "ao_map", "uv_preview")
     FUNCTION = "extract"
     CATEGORY = "Comfy_BlenderTools"
 
-    def extract(self, mesh):
+    def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
+        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
+        if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
+            img = Image.new('RGB', (res_x, res_y), 'black')
+            draw = ImageDraw.Draw(img)
+            if mesh.faces.shape[1] == 3:
+                for face in mesh.faces:
+                    points = [(mesh.visual.uv[i][0] * res_x, (1 - mesh.visual.uv[i][1]) * res_y) for i in face]
+                    points.append(points[0])
+                    draw.line(points, fill='white', width=1)
+            uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
+        return uv_layout_image
+
+    def extract(self, mesh, texture_resolution=1024, export_uv_layout=True):
         dummy_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
         def pil_to_tensor(pil_img):
@@ -1033,7 +1050,7 @@ class ExtractMaterial:
             return torch.from_numpy(img_array)[None,]
 
         if not hasattr(mesh, "visual") or not hasattr(mesh.visual, "material"):
-            return (dummy_image, dummy_image, dummy_image, dummy_image)
+            return (dummy_image, dummy_image, dummy_image, dummy_image, dummy_image)
 
         mat = mesh.visual.material
 
@@ -1042,4 +1059,6 @@ class ExtractMaterial:
         mr_map = pil_to_tensor(getattr(mat, "metallicRoughnessTexture", None))
         ao_map = pil_to_tensor(getattr(mat, "occlusionTexture", None))
 
-        return (albedo_map, normal_map, mr_map, ao_map)
+        uv_preview = self.generate_uv_preview(mesh, texture_resolution, texture_resolution, export_uv_layout)
+
+        return (albedo_map, normal_map, mr_map, ao_map, uv_preview)

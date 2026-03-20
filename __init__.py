@@ -27,6 +27,7 @@ from .utils import (
     InstantMeshes,
     UnwrapColoredMesh,
     BlenderPreview,
+    BlenderUVPack,
 )
 from .vertexbake_nodes import (
     VertexToHighPoly,
@@ -74,6 +75,7 @@ NODE_CLASS_MAPPINGS = {
     "UnwrapColoredMesh": UnwrapColoredMesh,
     "BlenderPreview": BlenderPreview,
     "GS_PlyToMesh": GS_PlyToMesh,
+    "BlenderUVPack": BlenderUVPack,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -110,6 +112,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnwrapColoredMesh": "Unwrap Colored Mesh (UVgami)",
     "BlenderPreview": "Blender Preview",
     "GS_PlyToMesh": "GS Ply To Mesh",
+    "BlenderUVPack": "Blender UV Pack",
 }
 
 
