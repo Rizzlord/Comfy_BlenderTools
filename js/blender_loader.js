@@ -10,6 +10,8 @@ let THREE = null;
 let GLTFLoader = null;
 let OrbitControls = null;
 const PREVIEW_TEXTURE_SIZE = 2048;
+const CHECKER_GRID_COUNT = 8;
+const CHECKER_REPEAT = 12;
 const STRETCH_COLOR_STOPS = [
     [1.0, [20, 136, 173]],
     [1.02, [24, 157, 181]],
@@ -279,6 +281,55 @@ function createStretchTextureForGeometry(geometry) {
     return texture;
 }
 
+function createCheckerMapTexture() {
+    if (!THREE) {
+        return null;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = PREVIEW_TEXTURE_SIZE;
+    canvas.height = PREVIEW_TEXTURE_SIZE;
+    const context = canvas.getContext("2d");
+    const cellSize = canvas.width / CHECKER_GRID_COUNT;
+
+    context.fillStyle = "#f7f4eb";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < CHECKER_GRID_COUNT; y += 1) {
+        for (let x = 0; x < CHECKER_GRID_COUNT; x += 1) {
+            const left = x * cellSize;
+            const top = y * cellSize;
+            context.fillStyle = (x + y) % 2 === 0 ? "#11151b" : "#f7f4eb";
+            context.fillRect(left, top, cellSize, cellSize);
+        }
+    }
+
+    context.strokeStyle = "rgba(10, 168, 201, 0.58)";
+    context.lineWidth = 2;
+    for (let gridIndex = 0; gridIndex <= CHECKER_GRID_COUNT; gridIndex += 1) {
+        const offset = gridIndex * cellSize;
+
+        context.beginPath();
+        context.moveTo(offset, 0);
+        context.lineTo(offset, canvas.height);
+        context.stroke();
+
+        context.beginPath();
+        context.moveTo(0, offset);
+        context.lineTo(canvas.width, offset);
+        context.stroke();
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(CHECKER_REPEAT, CHECKER_REPEAT);
+    texture.anisotropy = 8;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+}
+
 function buildSeamGeometryForMesh(mesh, posTol = 1e-6, uvTol = 1e-6) {
     const geometry = mesh?.geometry;
     const positionAttribute = geometry?.attributes?.position;
@@ -444,6 +495,13 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         _stretchMaterials: new Map(),
         _seamOverlays: new Map(),
         _showSeams: false,
+        _loadToken: 0,
+        _sharedMaterials: {
+            normal: null,
+            wireframe: null,
+            checkerUv: null,
+            checkerFallback: null,
+        },
 
         draw(ctx, node, widget_width, y, widget_height) { },
         computeSize(width) {
@@ -501,6 +559,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     toolbar.appendChild(createButton("Original", "original"));
     toolbar.appendChild(createButton("Normal", "normal"));
     toolbar.appendChild(createButton("Wireframe", "wireframe"));
+    toolbar.appendChild(createButton("Checker", "checker"));
     toolbar.appendChild(createButton("Stretch", "stretch"));
 
     // Resolution Dropdown
@@ -617,11 +676,49 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         if (widget._animationId) cancelAnimationFrame(widget._animationId);
         if (widget._renderer) widget._renderer.dispose();
         if (widget._controls) widget._controls.dispose();
-        disposeGeneratedResources();
+        releaseCurrentModel();
+        disposeSharedMaterials();
     };
 
     // --- Render Logic ---
     let currentFilePath = "";
+    let pendingFilePath = "";
+
+    const setStatsLines = (lines, color = "rgba(255, 255, 255, 0.7)") => {
+        statsOverlay.style.color = color;
+        statsOverlay.innerHTML = (lines || [])
+            .filter((line) => line)
+            .map((line) => `<div>${line}</div>`)
+            .join("");
+    };
+
+    const addMaterialToSet = (material, target) => {
+        if (!material) return;
+        if (Array.isArray(material)) {
+            material.forEach((entry) => {
+                if (entry) target.add(entry);
+            });
+            return;
+        }
+        target.add(material);
+    };
+
+    const disposeMaterial = (material, disposedTextures = new Set()) => {
+        if (!material) return;
+        if (Array.isArray(material)) {
+            material.forEach((entry) => disposeMaterial(entry, disposedTextures));
+            return;
+        }
+
+        for (const value of Object.values(material)) {
+            if (value?.isTexture && !disposedTextures.has(value)) {
+                disposedTextures.add(value);
+                value.dispose();
+            }
+        }
+
+        material.dispose?.();
+    };
 
     const disposeGeneratedResources = () => {
         for (const material of widget._stretchMaterials.values()) {
@@ -640,6 +737,123 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             overlay.material?.dispose?.();
         }
         widget._seamOverlays.clear();
+    };
+
+    const disposeDetachedModel = (model) => {
+        if (!model) return;
+
+        const geometries = new Set();
+        const materials = new Set();
+        model.traverse((child) => {
+            if (!child.isMesh) return;
+            if (child.geometry) {
+                geometries.add(child.geometry);
+            }
+            addMaterialToSet(child.material, materials);
+        });
+
+        for (const geometry of geometries) {
+            geometry.dispose?.();
+        }
+
+        const disposedTextures = new Set();
+        for (const material of materials) {
+            disposeMaterial(material, disposedTextures);
+        }
+    };
+
+    const releaseCurrentModel = () => {
+        if (widget._model && widget._scene) {
+            widget._scene.remove(widget._model);
+        }
+
+        const geometries = new Set();
+        const originalMaterials = new Set();
+
+        if (widget._model) {
+            widget._model.traverse((child) => {
+                if (!child.isMesh) return;
+                if (child.geometry) {
+                    geometries.add(child.geometry);
+                }
+            });
+        }
+
+        for (const material of widget._originalMaterials.values()) {
+            addMaterialToSet(material, originalMaterials);
+        }
+
+        disposeGeneratedResources();
+
+        for (const geometry of geometries) {
+            geometry.dispose?.();
+        }
+
+        const disposedTextures = new Set();
+        for (const material of originalMaterials) {
+            disposeMaterial(material, disposedTextures);
+        }
+
+        widget._originalMaterials.clear();
+        widget._model = null;
+    };
+
+    const disposeSharedMaterials = () => {
+        const disposedTextures = new Set();
+        disposeMaterial(widget._sharedMaterials.normal, disposedTextures);
+        disposeMaterial(widget._sharedMaterials.wireframe, disposedTextures);
+        disposeMaterial(widget._sharedMaterials.checkerUv, disposedTextures);
+        disposeMaterial(widget._sharedMaterials.checkerFallback, disposedTextures);
+        widget._sharedMaterials.normal = null;
+        widget._sharedMaterials.wireframe = null;
+        widget._sharedMaterials.checkerUv = null;
+        widget._sharedMaterials.checkerFallback = null;
+    };
+
+    const getSharedMaterial = (mode) => {
+        if (mode === "normal") {
+            if (!widget._sharedMaterials.normal) {
+                widget._sharedMaterials.normal = new THREE.MeshNormalMaterial();
+            }
+            return widget._sharedMaterials.normal;
+        }
+
+        if (mode === "wireframe") {
+            if (!widget._sharedMaterials.wireframe) {
+                widget._sharedMaterials.wireframe = new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    wireframe: true,
+                });
+            }
+            return widget._sharedMaterials.wireframe;
+        }
+
+        if (mode === "checker_uv") {
+            if (!widget._sharedMaterials.checkerUv) {
+                widget._sharedMaterials.checkerUv = new THREE.MeshStandardMaterial({
+                    color: 0xffffff,
+                    map: createCheckerMapTexture(),
+                    roughness: 0.88,
+                    metalness: 0.02,
+                    side: THREE.DoubleSide,
+                });
+            }
+            return widget._sharedMaterials.checkerUv;
+        }
+
+        if (mode === "checker_fallback") {
+            if (!widget._sharedMaterials.checkerFallback) {
+                widget._sharedMaterials.checkerFallback = new THREE.MeshStandardMaterial({
+                    color: 0xc9bea9,
+                    roughness: 0.72,
+                    metalness: 0.04,
+                    side: THREE.DoubleSide,
+                });
+            }
+            return widget._sharedMaterials.checkerFallback;
+        }
+
+        return null;
     };
 
     const ensureStretchMaterials = () => {
@@ -708,9 +922,13 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                         child.material = widget._originalMaterials.get(child.uuid);
                     }
                 } else if (mode === 'normal') {
-                    child.material = new THREE.MeshNormalMaterial();
+                    child.material = getSharedMaterial("normal");
                 } else if (mode === 'wireframe') {
-                    child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+                    child.material = getSharedMaterial("wireframe");
+                } else if (mode === 'checker') {
+                    child.material = child.geometry?.attributes?.uv
+                        ? getSharedMaterial("checker_uv")
+                        : getSharedMaterial("checker_fallback");
                 } else if (mode === 'stretch') {
                     const stretchMaterial = widget._stretchMaterials.get(child.uuid);
                     if (stretchMaterial) {
@@ -731,7 +949,9 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             return;
         }
 
-        const previewWidget = node.widgets.find(w => w.name === "preview_model");
+        const previewWidget = Array.isArray(node.widgets)
+            ? node.widgets.find((w) => w.name === "preview_model")
+            : null;
         const showPreview = previewWidget ? previewWidget.value : true;
 
         if (!showPreview || !widget._renderer) {
@@ -741,6 +961,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         const canvas = app.canvas.canvas;
         const ds = app.canvas.ds;
+        if (!canvas || !ds) {
+            container.style.display = "none";
+            return;
+        }
         const rect = canvas.getBoundingClientRect();
 
         const nodeX = (node.pos[0] + ds.offset[0]) * ds.scale + rect.left;
@@ -765,6 +989,18 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         const elH = availableH * ds.scale;
         const elW = (node.size[0] - 20) * ds.scale;
         const elLeft = nodeX + (10 * ds.scale);
+
+        if (
+            !Number.isFinite(elTop) ||
+            !Number.isFinite(elH) ||
+            !Number.isFinite(elW) ||
+            !Number.isFinite(elLeft) ||
+            elH <= 1 ||
+            elW <= 1
+        ) {
+            container.style.display = "none";
+            return;
+        }
 
         container.style.transform = `translate(${elLeft}px, ${elTop}px)`;
         container.style.width = `${elW}px`;
@@ -822,7 +1058,9 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         await loadThree();
         if (!THREE || !GLTFLoader || !OrbitControls) return;
 
-        const previewWidget = node.widgets.find(w => w.name === "preview_model");
+        const previewWidget = Array.isArray(node.widgets)
+            ? node.widgets.find((w) => w.name === "preview_model")
+            : null;
         const showPreview = previewWidget ? previewWidget.value : true;
 
         if (!showPreview) {
@@ -835,13 +1073,14 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         // If no path provided
         if (!relativePath || relativePath === "None") {
+            pendingFilePath = "";
+            currentFilePath = "";
+            widget._loadToken += 1;
+            releaseCurrentModel();
             if (alwaysShow) {
-                console.warn("[BlenderTools] No model path provided to preview.");
-                // Don't hide container, just maybe clear? 
-                // For now, let's keep previous model or just do nothing.
-                // Actually user said "show always the 3d viewer... if not there print out model not found"
-                // So we should prob ensure container is up.
+                setStatsLines(["No model loaded"], "rgba(255, 180, 120, 0.9)");
             } else {
+                setStatsLines([]);
                 container.style.display = "none";
                 if (widget._renderer) {
                     setTimeout(() => { node.setSize(node.computeSize()); }, 10);
@@ -853,6 +1092,12 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         const fullPath = relativePath && (relativePath.startsWith("/") ? relativePath : ("/" + relativePath));
 
         if (fullPath === currentFilePath && widget._model) {
+            container.style.display = "block";
+            updatePosition();
+            return;
+        }
+
+        if (fullPath === pendingFilePath) {
             container.style.display = "block";
             updatePosition();
             return;
@@ -911,16 +1156,27 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             return;
         }
 
-        currentFilePath = fullPath;
+        releaseCurrentModel();
+        currentFilePath = "";
+        pendingFilePath = fullPath;
+        const loadToken = ++widget._loadToken;
+        setStatsLines(["Loading preview..."]);
+        container.style.display = "block";
+        updatePosition();
 
-        const url = `/blender_tools/view_model?path=${encodeURIComponent(currentFilePath)}`;
+        const url = `/blender_tools/view_model?path=${encodeURIComponent(fullPath)}`;
 
         const loader = new GLTFLoader();
         loader.load(url, (gltf) => {
-            if (widget._model) widget._scene.remove(widget._model);
-            disposeGeneratedResources();
+            if (loadToken !== widget._loadToken) {
+                disposeDetachedModel(gltf.scene);
+                return;
+            }
+
             widget._model = gltf.scene;
             widget._originalMaterials.clear();
+            currentFilePath = fullPath;
+            pendingFilePath = "";
 
             let totalVertices = 0;
             let totalFaces = 0;
@@ -951,28 +1207,36 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
             widget._scene.add(widget._model);
 
+            const updateStatsUI = (v, f, s) => {
+                setStatsLines([
+                    `Verts: ${v.toLocaleString()}`,
+                    `Faces: ${f.toLocaleString()}`,
+                    `Size: ${s}`,
+                ]);
+            };
+
+            updateStatsUI(totalVertices, totalFaces, "Loading...");
+
             // Fetch File Size (HEAD request)
             fetch(url, { method: "HEAD" })
-                .then(res => {
+                .then((res) => {
+                    if (loadToken !== widget._loadToken || currentFilePath !== fullPath) {
+                        return;
+                    }
                     const len = res.headers.get("Content-Length");
                     let sizeStr = "? MB";
                     if (len) {
-                        const mb = parseInt(len) / (1024 * 1024);
+                        const mb = parseInt(len, 10) / (1024 * 1024);
                         sizeStr = mb.toFixed(2) + " MB";
                     }
                     updateStatsUI(totalVertices, totalFaces, sizeStr);
                 })
                 .catch(() => {
+                    if (loadToken !== widget._loadToken || currentFilePath !== fullPath) {
+                        return;
+                    }
                     updateStatsUI(totalVertices, totalFaces, "? MB");
                 });
-
-            const updateStatsUI = (v, f, s) => {
-                statsOverlay.innerHTML = `
-                    <div>Verts: ${v.toLocaleString()}</div>
-                    <div>Faces: ${f.toLocaleString()}</div>
-                    <div>Size: ${s}</div>
-                `;
-            };
 
             // Centering
             const box = new THREE.Box3().setFromObject(widget._model);
@@ -1002,12 +1266,22 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             updatePosition();
 
         }, undefined, (e) => {
+            if (loadToken !== widget._loadToken) {
+                return;
+            }
+
+            pendingFilePath = "";
+            currentFilePath = "";
             console.error("[BlenderTools] Loading Error:", e);
-            // Even on error, if alwaysShow, keep display block
+            releaseCurrentModel();
+
             if (alwaysShow) {
-                console.log("Model not found in console"); // User specific wording
+                setStatsLines(["Preview load failed"], "rgba(255, 140, 140, 0.95)");
                 container.style.display = "block";
                 updatePosition();
+            } else {
+                setStatsLines([]);
+                container.style.display = "none";
             }
         });
     };
