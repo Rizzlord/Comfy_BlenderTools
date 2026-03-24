@@ -9,6 +9,404 @@ const ORBITCONTROLS_URL = "https://esm.sh/three@0.160.0/examples/jsm/controls/Or
 let THREE = null;
 let GLTFLoader = null;
 let OrbitControls = null;
+const PREVIEW_TEXTURE_SIZE = 2048;
+const STRETCH_COLOR_STOPS = [
+    [1.0, [20, 136, 173]],
+    [1.02, [24, 157, 181]],
+    [1.08, [60, 190, 150]],
+    [1.15, [145, 208, 94]],
+    [1.25, [236, 196, 66]],
+    [1.5, [235, 146, 58]],
+    [2.0, [232, 93, 62]],
+    [4.0, [194, 60, 117]],
+    [8.0, [244, 244, 244]],
+];
+
+function sampleColorStops(stops, value) {
+    const clampedValue = Math.max(value, stops[0][0]);
+    for (let index = 1; index < stops.length; index += 1) {
+        const [stopValue, stopColor] = stops[index];
+        const [prevValue, prevColor] = stops[index - 1];
+        if (clampedValue <= stopValue) {
+            const local = (clampedValue - prevValue) / Math.max(stopValue - prevValue, 1e-6);
+            return [
+                prevColor[0] + (stopColor[0] - prevColor[0]) * local,
+                prevColor[1] + (stopColor[1] - prevColor[1]) * local,
+                prevColor[2] + (stopColor[2] - prevColor[2]) * local,
+            ];
+        }
+    }
+    return stops[stops.length - 1][1];
+}
+
+function stretchColor(stretch) {
+    return sampleColorStops(
+        STRETCH_COLOR_STOPS,
+        Math.max(Number.isFinite(stretch) ? stretch : 1, 1),
+    );
+}
+
+function createSequentialIndex(count) {
+    const index = new Uint32Array(count);
+    for (let i = 0; i < count; i += 1) {
+        index[i] = i;
+    }
+    return index;
+}
+
+function geometryIndices(geometry) {
+    if (!geometry?.attributes?.position) return null;
+    if (geometry.index?.array?.length) {
+        return geometry.index.array;
+    }
+    return createSequentialIndex(geometry.attributes.position.count);
+}
+
+function canUseAtlasMaterialForGeometry(geometry) {
+    const uvAttribute = geometry?.attributes?.uv;
+    if (!uvAttribute || uvAttribute.count === 0) {
+        return false;
+    }
+
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < uvAttribute.count; index += 1) {
+        const x = uvAttribute.getX(index);
+        const y = uvAttribute.getY(index);
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+    }
+
+    return minX >= -0.05 && minY >= -0.05 && maxX <= 1.05 && maxY <= 1.05;
+}
+
+function computeStretchPerFace(geometry) {
+    const positionAttribute = geometry?.attributes?.position;
+    const uvAttribute = geometry?.attributes?.uv;
+    const indices = geometryIndices(geometry);
+    if (!positionAttribute || !uvAttribute || !indices || indices.length % 3 !== 0) {
+        return null;
+    }
+
+    const positions = positionAttribute.array;
+    const uvs = uvAttribute.array;
+    const faceCount = indices.length / 3;
+    const stretches = new Float32Array(faceCount);
+
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
+        const offset = faceIndex * 3;
+        const ia = indices[offset];
+        const ib = indices[offset + 1];
+        const ic = indices[offset + 2];
+
+        const a3 = ia * 3;
+        const b3 = ib * 3;
+        const c3 = ic * 3;
+        const a2 = ia * 2;
+        const b2 = ib * 2;
+        const c2 = ic * 2;
+
+        const ax = positions[a3];
+        const ay = positions[a3 + 1];
+        const az = positions[a3 + 2];
+        const bx = positions[b3];
+        const by = positions[b3 + 1];
+        const bz = positions[b3 + 2];
+        const cx = positions[c3];
+        const cy = positions[c3 + 1];
+        const cz = positions[c3 + 2];
+
+        const e1x = bx - ax;
+        const e1y = by - ay;
+        const e1z = bz - az;
+        const e2x = cx - ax;
+        const e2y = cy - ay;
+        const e2z = cz - az;
+
+        const nx = e1y * e2z - e1z * e2y;
+        const ny = e1z * e2x - e1x * e2z;
+        const nz = e1x * e2y - e1y * e2x;
+
+        const e1Len = Math.hypot(e1x, e1y, e1z);
+        if (e1Len <= 1e-8) {
+            stretches[faceIndex] = 8.0;
+            continue;
+        }
+
+        const xAxisX = e1x / e1Len;
+        const xAxisY = e1y / e1Len;
+        const xAxisZ = e1z / e1Len;
+
+        const yRawX = ny * xAxisZ - nz * xAxisY;
+        const yRawY = nz * xAxisX - nx * xAxisZ;
+        const yRawZ = nx * xAxisY - ny * xAxisX;
+        const yNorm = Math.hypot(yRawX, yRawY, yRawZ);
+        if (yNorm <= 1e-8) {
+            stretches[faceIndex] = 8.0;
+            continue;
+        }
+
+        const yAxisX = yRawX / yNorm;
+        const yAxisY = yRawY / yNorm;
+        const yAxisZ = yRawZ / yNorm;
+
+        const x1 = e1Len;
+        const x2 = e2x * xAxisX + e2y * xAxisY + e2z * xAxisZ;
+        const y2 = e2x * yAxisX + e2y * yAxisY + e2z * yAxisZ;
+        const detP = x1 * y2;
+        if (Math.abs(detP) <= 1e-10) {
+            stretches[faceIndex] = 8.0;
+            continue;
+        }
+
+        const du1 = uvs[b2] - uvs[a2];
+        const du2 = uvs[c2] - uvs[a2];
+        const dv1 = uvs[b2 + 1] - uvs[a2 + 1];
+        const dv2 = uvs[c2 + 1] - uvs[a2 + 1];
+
+        const invP00 = 1.0 / x1;
+        const invP01 = -x2 / detP;
+        const invP10 = 0.0;
+        const invP11 = 1.0 / y2;
+
+        const j00 = du1 * invP00 + du2 * invP10;
+        const j01 = du1 * invP01 + du2 * invP11;
+        const j10 = dv1 * invP00 + dv2 * invP10;
+        const j11 = dv1 * invP01 + dv2 * invP11;
+
+        const s00 = j00 * j00 + j10 * j10;
+        const s01 = j00 * j01 + j10 * j11;
+        const s11 = j01 * j01 + j11 * j11;
+        const trace = s00 + s11;
+        const det = s00 * s11 - s01 * s01;
+        const disc = Math.sqrt(Math.max(trace * trace * 0.25 - det, 0.0));
+        const lambdaMax = Math.max(trace * 0.5 + disc, 0.0);
+        const lambdaMin = Math.max(trace * 0.5 - disc, 0.0);
+        const sigmaMax = Math.sqrt(lambdaMax);
+        const sigmaMin = Math.sqrt(lambdaMin);
+
+        stretches[faceIndex] = sigmaMin > 1e-8 ? sigmaMax / sigmaMin : 8.0;
+    }
+
+    return stretches;
+}
+
+function createStretchTextureForGeometry(geometry) {
+    const uvAttribute = geometry?.attributes?.uv;
+    const indices = geometryIndices(geometry);
+    if (!uvAttribute || !indices || indices.length % 3 !== 0 || !canUseAtlasMaterialForGeometry(geometry)) {
+        return null;
+    }
+
+    const stretchPerFace = computeStretchPerFace(geometry);
+    if (!stretchPerFace) {
+        return null;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = PREVIEW_TEXTURE_SIZE;
+    canvas.height = PREVIEW_TEXTURE_SIZE;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#081118";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const gridStep = canvas.width / 8;
+    context.strokeStyle = "rgba(127, 215, 234, 0.08)";
+    context.lineWidth = 2;
+    for (let step = 0; step <= 8; step += 1) {
+        context.beginPath();
+        context.moveTo(step * gridStep, 0);
+        context.lineTo(step * gridStep, canvas.height);
+        context.stroke();
+        context.beginPath();
+        context.moveTo(0, step * gridStep);
+        context.lineTo(canvas.width, step * gridStep);
+        context.stroke();
+    }
+
+    const project = (index) => [
+        uvAttribute.getX(index) * canvas.width,
+        (1 - uvAttribute.getY(index)) * canvas.height,
+    ];
+
+    for (let faceIndex = 0; faceIndex < stretchPerFace.length; faceIndex += 1) {
+        const offset = faceIndex * 3;
+        const ia = indices[offset];
+        const ib = indices[offset + 1];
+        const ic = indices[offset + 2];
+        const p1 = project(ia);
+        const p2 = project(ib);
+        const p3 = project(ic);
+        const color = stretchColor(stretchPerFace[faceIndex]);
+
+        context.beginPath();
+        context.moveTo(p1[0], p1[1]);
+        context.lineTo(p2[0], p2[1]);
+        context.lineTo(p3[0], p3[1]);
+        context.closePath();
+        context.fillStyle = `rgb(${Math.round(color[0])}, ${Math.round(color[1])}, ${Math.round(color[2])})`;
+        context.fill();
+    }
+
+    context.strokeStyle = "rgba(245, 242, 232, 0.32)";
+    context.lineWidth = 1.1;
+    for (let faceIndex = 0; faceIndex < stretchPerFace.length; faceIndex += 1) {
+        const offset = faceIndex * 3;
+        const ia = indices[offset];
+        const ib = indices[offset + 1];
+        const ic = indices[offset + 2];
+        const p1 = project(ia);
+        const p2 = project(ib);
+        const p3 = project(ic);
+        context.beginPath();
+        context.moveTo(p1[0], p1[1]);
+        context.lineTo(p2[0], p2[1]);
+        context.lineTo(p3[0], p3[1]);
+        context.closePath();
+        context.stroke();
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.anisotropy = 8;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+}
+
+function buildSeamGeometryForMesh(mesh, posTol = 1e-6, uvTol = 1e-6) {
+    const geometry = mesh?.geometry;
+    const positionAttribute = geometry?.attributes?.position;
+    const uvAttribute = geometry?.attributes?.uv;
+    const indices = geometryIndices(geometry);
+    if (!positionAttribute || !uvAttribute || !indices || indices.length % 3 !== 0) {
+        return null;
+    }
+
+    const decimals = Math.max(0, Math.round(-Math.log10(posTol)));
+    const weldedLookup = new Map();
+    const weldedIndices = new Int32Array(positionAttribute.count);
+    let weldedCount = 0;
+
+    for (let index = 0; index < positionAttribute.count; index += 1) {
+        const key = [
+            positionAttribute.getX(index).toFixed(decimals),
+            positionAttribute.getY(index).toFixed(decimals),
+            positionAttribute.getZ(index).toFixed(decimals),
+        ].join("|");
+        let weldedIndex = weldedLookup.get(key);
+        if (weldedIndex === undefined) {
+            weldedIndex = weldedCount;
+            weldedLookup.set(key, weldedIndex);
+            weldedCount += 1;
+        }
+        weldedIndices[index] = weldedIndex;
+    }
+
+    const edgeRecords = new Map();
+    const faceCount = indices.length / 3;
+    const localEdges = [[0, 1], [1, 2], [2, 0]];
+
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
+        const offset = faceIndex * 3;
+        const face = [indices[offset], indices[offset + 1], indices[offset + 2]];
+        const weldedFace = [
+            weldedIndices[face[0]],
+            weldedIndices[face[1]],
+            weldedIndices[face[2]],
+        ];
+
+        for (const [cornerA, cornerB] of localEdges) {
+            const vertexA = face[cornerA];
+            const vertexB = face[cornerB];
+            const weldedA = weldedFace[cornerA];
+            const weldedB = weldedFace[cornerB];
+
+            let key;
+            let uvA;
+            let uvB;
+            let posA;
+            let posB;
+            if (weldedA <= weldedB) {
+                key = `${weldedA}|${weldedB}`;
+                uvA = [uvAttribute.getX(vertexA), uvAttribute.getY(vertexA)];
+                uvB = [uvAttribute.getX(vertexB), uvAttribute.getY(vertexB)];
+                posA = [
+                    positionAttribute.getX(vertexA),
+                    positionAttribute.getY(vertexA),
+                    positionAttribute.getZ(vertexA),
+                ];
+                posB = [
+                    positionAttribute.getX(vertexB),
+                    positionAttribute.getY(vertexB),
+                    positionAttribute.getZ(vertexB),
+                ];
+            } else {
+                key = `${weldedB}|${weldedA}`;
+                uvA = [uvAttribute.getX(vertexB), uvAttribute.getY(vertexB)];
+                uvB = [uvAttribute.getX(vertexA), uvAttribute.getY(vertexA)];
+                posA = [
+                    positionAttribute.getX(vertexB),
+                    positionAttribute.getY(vertexB),
+                    positionAttribute.getZ(vertexB),
+                ];
+                posB = [
+                    positionAttribute.getX(vertexA),
+                    positionAttribute.getY(vertexA),
+                    positionAttribute.getZ(vertexA),
+                ];
+            }
+
+            if (!edgeRecords.has(key)) {
+                edgeRecords.set(key, []);
+            }
+            edgeRecords.get(key).push({ uvA, uvB, posA, posB });
+        }
+    }
+
+    const seamPositions = [];
+    for (const records of edgeRecords.values()) {
+        const first = records[0];
+        if (records.length === 1) {
+            seamPositions.push(...first.posA, ...first.posB);
+            continue;
+        }
+
+        let sameUv = true;
+        for (let recordIndex = 1; recordIndex < records.length; recordIndex += 1) {
+            const record = records[recordIndex];
+            if (
+                Math.abs(record.uvA[0] - first.uvA[0]) > uvTol ||
+                Math.abs(record.uvA[1] - first.uvA[1]) > uvTol ||
+                Math.abs(record.uvB[0] - first.uvB[0]) > uvTol ||
+                Math.abs(record.uvB[1] - first.uvB[1]) > uvTol
+            ) {
+                sameUv = false;
+                break;
+            }
+        }
+
+        if (!sameUv) {
+            seamPositions.push(...first.posA, ...first.posB);
+        }
+    }
+
+    if (seamPositions.length === 0) {
+        return null;
+    }
+
+    const seamGeometry = new THREE.BufferGeometry();
+    seamGeometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(seamPositions, 3),
+    );
+    return seamGeometry;
+}
 
 async function loadThree() {
     if (THREE && GLTFLoader && OrbitControls) return;
@@ -43,6 +441,9 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         _renderMode: 'original',
         _renderQuality: 1024, // Default resolution height
         _originalMaterials: new Map(),
+        _stretchMaterials: new Map(),
+        _seamOverlays: new Map(),
+        _showSeams: false,
 
         draw(ctx, node, widget_width, y, widget_height) { },
         computeSize(width) {
@@ -100,6 +501,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     toolbar.appendChild(createButton("Original", "original"));
     toolbar.appendChild(createButton("Normal", "normal"));
     toolbar.appendChild(createButton("Wireframe", "wireframe"));
+    toolbar.appendChild(createButton("Stretch", "stretch"));
 
     // Resolution Dropdown
     const resSelect = document.createElement("select");
@@ -164,6 +566,33 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     sliderContainer.appendChild(slider);
     toolbar.appendChild(sliderContainer);
 
+    const seamToggleContainer = document.createElement("label");
+    Object.assign(seamToggleContainer.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "4px",
+        marginLeft: "10px",
+        color: "#eee",
+        fontSize: "10px",
+        cursor: "pointer"
+    });
+
+    const seamToggle = document.createElement("input");
+    seamToggle.type = "checkbox";
+    seamToggle.checked = false;
+    seamToggle.style.cursor = "pointer";
+    seamToggle.oninput = (e) => {
+        widget._showSeams = Boolean(e.target.checked);
+        ensureSeamOverlays();
+        updateSeamVisibility();
+    };
+
+    const seamToggleText = document.createElement("span");
+    seamToggleText.textContent = "Show seams";
+    seamToggleContainer.appendChild(seamToggle);
+    seamToggleContainer.appendChild(seamToggleText);
+    toolbar.appendChild(seamToggleContainer);
+
     // Stats Overlay
     const statsOverlay = document.createElement("div");
     Object.assign(statsOverlay.style, {
@@ -188,14 +617,89 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         if (widget._animationId) cancelAnimationFrame(widget._animationId);
         if (widget._renderer) widget._renderer.dispose();
         if (widget._controls) widget._controls.dispose();
+        disposeGeneratedResources();
     };
 
     // --- Render Logic ---
     let currentFilePath = "";
 
+    const disposeGeneratedResources = () => {
+        for (const material of widget._stretchMaterials.values()) {
+            if (material?.map) {
+                material.map.dispose();
+            }
+            material?.dispose?.();
+        }
+        widget._stretchMaterials.clear();
+
+        for (const overlay of widget._seamOverlays.values()) {
+            if (overlay.parent) {
+                overlay.parent.remove(overlay);
+            }
+            overlay.geometry?.dispose?.();
+            overlay.material?.dispose?.();
+        }
+        widget._seamOverlays.clear();
+    };
+
+    const ensureStretchMaterials = () => {
+        if (!widget._model || widget._stretchMaterials.size > 0) return;
+        widget._model.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+            const stretchTexture = createStretchTextureForGeometry(child.geometry);
+            const stretchMaterial = stretchTexture
+                ? new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    map: stretchTexture,
+                    side: THREE.DoubleSide,
+                    toneMapped: false,
+                })
+                : new THREE.MeshStandardMaterial({
+                    color: 0xd8d0bf,
+                    roughness: 0.55,
+                    metalness: 0.08,
+                    side: THREE.DoubleSide,
+                });
+            widget._stretchMaterials.set(child.uuid, stretchMaterial);
+        });
+    };
+
+    const ensureSeamOverlays = () => {
+        if (!widget._model) return;
+        if (widget._seamOverlays.size > 0) return;
+
+        widget._model.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+            const seamGeometry = buildSeamGeometryForMesh(child);
+            if (!seamGeometry) return;
+            const seamLines = new THREE.LineSegments(
+                seamGeometry,
+                new THREE.LineBasicMaterial({
+                    color: 0xff9167,
+                    transparent: true,
+                    opacity: 0.95,
+                    depthWrite: false,
+                }),
+            );
+            seamLines.visible = widget._showSeams;
+            seamLines.renderOrder = 10;
+            child.add(seamLines);
+            widget._seamOverlays.set(child.uuid, seamLines);
+        });
+    };
+
+    const updateSeamVisibility = () => {
+        for (const overlay of widget._seamOverlays.values()) {
+            overlay.visible = widget._showSeams;
+        }
+    };
+
     const setRenderMode = (mode) => {
         if (!widget._model || !THREE) return;
         widget._renderMode = mode;
+        if (mode === 'stretch') {
+            ensureStretchMaterials();
+        }
 
         widget._model.traverse((child) => {
             if (child.isMesh) {
@@ -207,9 +711,18 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                     child.material = new THREE.MeshNormalMaterial();
                 } else if (mode === 'wireframe') {
                     child.material = new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true });
+                } else if (mode === 'stretch') {
+                    const stretchMaterial = widget._stretchMaterials.get(child.uuid);
+                    if (stretchMaterial) {
+                        child.material = stretchMaterial;
+                    }
                 }
             }
         });
+        if (widget._showSeams) {
+            ensureSeamOverlays();
+        }
+        updateSeamVisibility();
     };
 
     const updatePosition = () => {
@@ -405,6 +918,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         const loader = new GLTFLoader();
         loader.load(url, (gltf) => {
             if (widget._model) widget._scene.remove(widget._model);
+            disposeGeneratedResources();
             widget._model = gltf.scene;
             widget._originalMaterials.clear();
 
@@ -419,6 +933,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                         if (!child.geometry.attributes.normal) {
                             child.geometry.computeVertexNormals();
                         }
+                        child.geometry.computeBoundingBox();
 
                         // Stats counting
                         const geom = child.geometry;
@@ -476,6 +991,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             widget._controls.update();
 
             setRenderMode(widget._renderMode);
+            if (widget._showSeams) {
+                ensureSeamOverlays();
+                updateSeamVisibility();
+            }
 
             container.style.display = "block";
 
