@@ -2,13 +2,17 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // Load Three.js and OrbitControls from esm.sh
-const THREE_URL = "https://esm.sh/three@0.160.0";
-const GLTFLOADER_URL = "https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
-const ORBITCONTROLS_URL = "https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls.js";
-
 let THREE = null;
 let GLTFLoader = null;
+let OBJLoader = null;
+let FBXLoader = null;
+let USDZLoader = null;
 let OrbitControls = null;
+const GLTFLOADER_URL = "https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
+const OBJLOADER_URL = "https://esm.sh/three@0.160.0/examples/jsm/loaders/OBJLoader.js";
+const FBXLOADER_URL = "https://esm.sh/three@0.160.0/examples/jsm/loaders/FBXLoader.js";
+const USDZLOADER_URL = "https://esm.sh/three@0.160.0/examples/jsm/loaders/USDZLoader.js";
+const ORBITCONTROLS_URL = "https://esm.sh/three@0.160.0/examples/jsm/controls/OrbitControls.js";
 const PREVIEW_TEXTURE_SIZE = 2048;
 const CHECKER_GRID_COUNT = 8;
 const CHECKER_REPEAT = 12;
@@ -463,15 +467,24 @@ async function loadThree() {
     if (THREE && GLTFLoader && OrbitControls) return;
     try {
         THREE = await import(THREE_URL);
-        const GLTFModule = await import(GLTFLOADER_URL);
-        const OrbitModule = await import(ORBITCONTROLS_URL);
+        const [GLTFModule, OBJModule, FBXModule, USDZModule, OrbitModule] = await Promise.all([
+            import(GLTFLOADER_URL),
+            import(OBJLOADER_URL),
+            import(FBXLOADER_URL),
+            import(USDZLOADER_URL),
+            import(ORBITCONTROLS_URL)
+        ]);
         GLTFLoader = GLTFModule.GLTFLoader;
+        OBJLoader = OBJModule.OBJLoader;
+        FBXLoader = FBXModule.FBXLoader;
+        USDZLoader = USDZModule.USDZLoader;
         OrbitControls = OrbitModule.OrbitControls;
         console.log("[BlenderTools] Three.js dependencies loaded via esm.sh");
     } catch (e) {
         console.error("[BlenderTools] Failed to load Three.js dependencies", e);
     }
 }
+const THREE_URL = "https://esm.sh/three@0.160.0";
 
 // Reuseable 3D Widget Factory
 function create3DPreviewWidget(node, containerName = "3D Preview") {
@@ -494,7 +507,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         _originalMaterials: new Map(),
         _stretchMaterials: new Map(),
         _seamOverlays: new Map(),
+        _quadOverlays: new Map(),
         _showSeams: false,
+        _showQuads: false,
+        _modelText: null, // Stores raw OBJ source for quad overlays
         _loadToken: 0,
         _sharedMaterials: {
             normal: null,
@@ -652,6 +668,33 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     seamToggleContainer.appendChild(seamToggleText);
     toolbar.appendChild(seamToggleContainer);
 
+    const quadToggleContainer = document.createElement("label");
+    Object.assign(quadToggleContainer.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "4px",
+        marginLeft: "10px",
+        color: "#eee",
+        fontSize: "10px",
+        cursor: "pointer"
+    });
+
+    const quadToggle = document.createElement("input");
+    quadToggle.type = "checkbox";
+    quadToggle.checked = false;
+    quadToggle.style.cursor = "pointer";
+    quadToggle.oninput = (e) => {
+        widget._showQuads = Boolean(e.target.checked);
+        ensureQuadOverlays();
+        updateQuadVisibility();
+    };
+
+    const quadToggleText = document.createElement("span");
+    quadToggleText.textContent = "Show quads";
+    quadToggleContainer.appendChild(quadToggle);
+    quadToggleContainer.appendChild(quadToggleText);
+    toolbar.appendChild(quadToggleContainer);
+
     // Stats Overlay
     const statsOverlay = document.createElement("div");
     Object.assign(statsOverlay.style, {
@@ -669,15 +712,19 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     container.appendChild(statsOverlay);
 
     // --- Cleanup ---
-    const onRemoved = node.onRemoved;
-    node.onRemoved = function () {
-        if (onRemoved) onRemoved.apply(this, arguments);
+    const cleanup = () => {
         if (container && container.parentNode) container.parentNode.removeChild(container);
         if (widget._animationId) cancelAnimationFrame(widget._animationId);
         if (widget._renderer) widget._renderer.dispose();
         if (widget._controls) widget._controls.dispose();
         releaseCurrentModel();
         disposeSharedMaterials();
+    };
+
+    const onRemovedOriginal = node.onRemoved;
+    node.onRemoved = function () {
+        cleanup();
+        if (onRemovedOriginal) onRemovedOriginal.apply(this, arguments);
     };
 
     // --- Render Logic ---
@@ -737,6 +784,15 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             overlay.material?.dispose?.();
         }
         widget._seamOverlays.clear();
+
+        for (const overlay of widget._quadOverlays.values()) {
+            if (overlay.parent) {
+                overlay.parent.remove(overlay);
+            }
+            overlay.geometry?.dispose?.();
+            overlay.material?.dispose?.();
+        }
+        widget._quadOverlays.clear();
     };
 
     const disposeDetachedModel = (model) => {
@@ -877,7 +933,6 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             widget._stretchMaterials.set(child.uuid, stretchMaterial);
         });
     };
-
     const ensureSeamOverlays = () => {
         if (!widget._model) return;
         if (widget._seamOverlays.size > 0) return;
@@ -889,10 +944,13 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             const seamLines = new THREE.LineSegments(
                 seamGeometry,
                 new THREE.LineBasicMaterial({
-                    color: 0xff9167,
+                    color: 0x00ffff,
                     transparent: true,
                     opacity: 0.95,
                     depthWrite: false,
+                    polygonOffset: true,
+                    polygonOffsetFactor: 1,
+                    polygonOffsetUnits: 1,
                 }),
             );
             seamLines.visible = widget._showSeams;
@@ -900,6 +958,79 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             child.add(seamLines);
             widget._seamOverlays.set(child.uuid, seamLines);
         });
+    };
+
+    const buildQuadGeometryFromOBJ = (text) => {
+        const positions = [];
+        const faces = [];
+        const lines = [];
+
+        for (const line of text.split("\n")) {
+            const parts = line.trim().split(/\s+/);
+            if (parts[0] === "v") {
+                positions.push(parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3]));
+            } else if (parts[0] === "f") {
+                const face = parts.slice(1).map(p => parseInt(p.split("/")[0]) - 1);
+                if (face.length >= 3) {
+                    for (let i = 0; i < face.length; i++) {
+                        const a = face[i];
+                        const b = face[(i + 1) % face.length];
+                        const ax = positions[a * 3], ay = positions[a * 3 + 1], az = positions[a * 3 + 2];
+                        const bx = positions[b * 3], by = positions[b * 3 + 1], bz = positions[b * 3 + 2];
+                        lines.push(ax, ay, az, bx, by, bz);
+                    }
+                }
+            }
+        }
+
+        if (lines.length === 0) return null;
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(lines, 3));
+        return geometry;
+    };
+
+    const ensureQuadOverlays = (objText = null) => {
+        if (!widget._model) return;
+        if (widget._quadOverlays.size > 0) return;
+
+        const effectiveText = objText || widget._modelText;
+
+        widget._model.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+
+            let quadGeometry = null;
+            if (effectiveText) {
+                quadGeometry = buildQuadGeometryFromOBJ(effectiveText);
+            }
+
+            // Fallback for non-OBJ or failed parse
+            if (!quadGeometry) {
+                quadGeometry = new THREE.EdgesGeometry(child.geometry, 1);
+            }
+
+            const quadLines = new THREE.LineSegments(
+                quadGeometry,
+                new THREE.LineBasicMaterial({
+                    color: 0xffd700,
+                    transparent: true,
+                    opacity: 0.8,
+                    depthWrite: false,
+                    polygonOffset: true,
+                    polygonOffsetFactor: 1,
+                    polygonOffsetUnits: 1,
+                }),
+            );
+            quadLines.visible = widget._showQuads;
+            quadLines.renderOrder = 11;
+            child.add(quadLines);
+            widget._quadOverlays.set(child.uuid, quadLines);
+        });
+    };
+
+    const updateQuadVisibility = () => {
+        for (const overlay of widget._quadOverlays.values()) {
+            overlay.visible = widget._showQuads;
+        }
     };
 
     const updateSeamVisibility = () => {
@@ -941,10 +1072,15 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             ensureSeamOverlays();
         }
         updateSeamVisibility();
+
+        if (widget._showQuads) {
+            ensureQuadOverlays();
+        }
+        updateQuadVisibility();
     };
 
     const updatePosition = () => {
-        if (node.flags.collapsed) {
+        if (!node.graph || node.flags.collapsed) {
             container.style.display = "none";
             return;
         }
@@ -1164,16 +1300,62 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         container.style.display = "block";
         updatePosition();
 
-        const url = `/blender_tools/view_model?path=${encodeURIComponent(fullPath)}`;
+        const ts = Date.now();
+        const url = `/blender_tools/view_model?path=${encodeURIComponent(fullPath)}&ts=${ts}`;
 
-        const loader = new GLTFLoader();
-        loader.load(url, (gltf) => {
+        let loader;
+        const ext = fullPath.split('.').pop().toLowerCase();
+
+        if (ext === 'obj') {
+            loader = new OBJLoader();
+        } else if (ext === 'fbx') {
+            loader = new FBXLoader();
+        } else if (ext === 'usdz' || ext === 'udz') {
+            loader = new USDZLoader();
+        } else {
+            loader = new GLTFLoader();
+        }
+        const onProgress = undefined;
+        const onError = (e) => {
             if (loadToken !== widget._loadToken) {
-                disposeDetachedModel(gltf.scene);
                 return;
             }
 
-            widget._model = gltf.scene;
+            pendingFilePath = "";
+            currentFilePath = "";
+            console.error("[BlenderTools] Loading Error:", e);
+            releaseCurrentModel();
+
+            if (alwaysShow) {
+                setStatsLines(["Preview load failed"], "rgba(255, 140, 140, 0.95)");
+                container.style.display = "block";
+                updatePosition();
+            } else {
+                setStatsLines([]);
+                container.style.display = "none";
+            }
+        };
+
+        loader.load(url, async (object) => {
+            if (loadToken !== widget._loadToken) {
+                disposeDetachedModel(object.scene || object);
+                return;
+            }
+
+            let objText = null;
+            if (ext === 'obj') {
+                try {
+                    const resp = await fetch(url);
+                    objText = await resp.text();
+                    widget._modelText = objText;
+                } catch (e) {
+                    console.warn("[BlenderTools] Could not fetch OBJ text for quad overlay:", e);
+                }
+            } else {
+                widget._modelText = null;
+            }
+
+            widget._model = object.scene || object;
             widget._originalMaterials.clear();
             currentFilePath = fullPath;
             pendingFilePath = "";
@@ -1259,31 +1441,15 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                 ensureSeamOverlays();
                 updateSeamVisibility();
             }
+            if (widget._showQuads) {
+                ensureQuadOverlays(objText);
+                updateQuadVisibility();
+            }
 
             container.style.display = "block";
-
-            // Same here, don't force size. Let user size persist natively.
             updatePosition();
 
-        }, undefined, (e) => {
-            if (loadToken !== widget._loadToken) {
-                return;
-            }
-
-            pendingFilePath = "";
-            currentFilePath = "";
-            console.error("[BlenderTools] Loading Error:", e);
-            releaseCurrentModel();
-
-            if (alwaysShow) {
-                setStatsLines(["Preview load failed"], "rgba(255, 140, 140, 0.95)");
-                container.style.display = "block";
-                updatePosition();
-            } else {
-                setStatsLines([]);
-                container.style.display = "none";
-            }
-        });
+        }, onProgress, onError);
     };
 
     node.addCustomWidget(widget);
@@ -1408,8 +1574,8 @@ app.registerExtension({
         const onExecuted = node.onExecuted;
         node.onExecuted = function (message) {
             if (onExecuted) onExecuted.apply(this, arguments);
-            if (message && message.glb_path) {
-                const path = message.glb_path[0];
+            if (message && message.model_path) {
+                const path = message.model_path[0];
                 widget.loadModel(path, true);
 
                 // Persist execution result to localStorage

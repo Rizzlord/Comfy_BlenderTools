@@ -28,6 +28,7 @@ from .utils import (
     UnwrapColoredMesh,
     BlenderPreview,
     BlenderUVPack,
+    BlenderPointsToMesh,
 )
 from .vertexbake_nodes import (
     VertexToHighPoly,
@@ -76,6 +77,7 @@ NODE_CLASS_MAPPINGS = {
     "BlenderPreview": BlenderPreview,
     "GS_PlyToMesh": GS_PlyToMesh,
     "BlenderUVPack": BlenderUVPack,
+    "BlenderPointsToMesh": BlenderPointsToMesh,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -113,6 +115,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BlenderPreview": "Blender Preview",
     "GS_PlyToMesh": "GS Ply To Mesh",
     "BlenderUVPack": "Blender UV Pack",
+    "BlenderPointsToMesh": "Blender Points To Mesh",
 }
 
 
@@ -129,7 +132,7 @@ async def list_models(request):
     if not os.path.exists(path) or not os.path.isdir(path):
          return web.json_response({"files": []})
          
-    files = [f for f in os.listdir(path) if f.lower().endswith(('.glb', '.obj', '.fbx', '.ply'))]
+    files = [f for f in os.listdir(path) if f.lower().endswith(('.glb', '.obj', '.fbx', '.ply', '.usdz', '.udz'))]
     return web.json_response({"files": sorted(files)})
 
 @PromptServer.instance.routes.get("/blender_tools/view_model")
@@ -139,7 +142,13 @@ async def view_model(request):
         
     path = request.rel_url.query["path"]
     
-    if not os.path.exists(path) or not os.path.isfile(path):
+    print(f"[BlenderTools] Requesting view_model for path: {path}")
+    if not os.path.exists(path):
+        print(f"[BlenderTools] Error: Path does NOT exist: {path}")
         return web.json_response({"error": "File not found"}, status=404)
+        
+    if not os.path.isfile(path):
+        print(f"[BlenderTools] Error: Path is NOT a file: {path}")
+        return web.json_response({"error": "Path is not a file"}, status=404)
         
     return web.FileResponse(path)

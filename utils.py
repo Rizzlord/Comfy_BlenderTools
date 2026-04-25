@@ -2773,3 +2773,120 @@ except Exception as e:
             print("Warning: Blender UV packing failed, returning original mesh.")
             uv_preview = self.generate_uv_preview(trimesh, texture_resolution, texture_resolution, export_uv_layout)
             return (trimesh, uv_preview)
+
+class BlenderPointsToMesh:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "points": ("POINTS",),
+                "density": ("FLOAT", {"default": 0.045, "min": 0.001, "max": 10.0, "step": 0.001}),
+                "voxel_amount": ("INT", {"default": 128, "min": 1, "max": 2048}),
+                "radius": ("FLOAT", {"default": 0.02, "min": 0.001, "max": 1.0, "step": 0.001}),
+                "threshold": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "adaptivity": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("TRIMESH",)
+    FUNCTION = "convert"
+    CATEGORY = "Comfy_BlenderTools/Utils"
+
+    def convert(self, points, density, voxel_amount, radius, threshold, adaptivity):
+        import trimesh
+        
+        # Extract xyz coordinates from the tensor
+        if hasattr(points, 'shape'):
+            if len(points.shape) == 3:
+                pts = points[0, :, :3].cpu().numpy()
+            else:
+                pts = points[:, :3].cpu().numpy()
+        else:
+            # Fallback if points is already a numpy array
+            pts = points
+            if len(pts.shape) == 3:
+                pts = pts[0, :, :3]
+            else:
+                pts = pts[:, :3]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_ply_path = os.path.join(temp_dir, "i.ply")
+            output_mesh_path = os.path.join(temp_dir, "o.glb")
+            script_path = os.path.join(temp_dir, "s.py")
+
+            pc = trimesh.PointCloud(pts)
+            pc.export(file_obj=input_ply_path)
+
+            params = {
+                'density': density,
+                'voxel_amount': voxel_amount,
+                'radius': radius,
+                'threshold': threshold,
+                'adaptivity': adaptivity,
+            }
+            script_params = {k: repr(v) for k, v in params.items()}
+            script_params['input_ply'] = repr(input_ply_path)
+            script_params['output_mesh'] = repr(output_mesh_path)
+
+            script = f"""
+import bpy, sys, os, traceback
+p = {{ {', '.join(f'\"{k}\": {v}' for k, v in script_params.items())} }}
+
+try:
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    
+    if hasattr(bpy.ops.wm, 'ply_import'):
+        bpy.ops.wm.ply_import(filepath=p['input_ply'])
+    else:
+        bpy.ops.import_mesh.ply(filepath=p['input_ply'])
+        
+    obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
+    if not obj:
+        raise Exception("No mesh found after importing PLY.")
+
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    mod = obj.modifiers.new(name="GN", type='NODES')
+    node_group = bpy.data.node_groups.new('GNTree', 'GeometryNodeTree')
+    mod.node_group = node_group
+
+    node_group.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+    node_group.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+    group_in = node_group.nodes.new('NodeGroupInput')
+    group_out = node_group.nodes.new('NodeGroupOutput')
+
+    mesh_to_points = node_group.nodes.new('GeometryNodeMeshToPoints')
+    mesh_to_points.mode = 'VERTICES'
+
+    points_to_volume = node_group.nodes.new('GeometryNodePointsToVolume')
+    points_to_volume.inputs['Density'].default_value = p['density']
+    points_to_volume.inputs['Voxel Amount'].default_value = p['voxel_amount']
+    points_to_volume.inputs['Radius'].default_value = p['radius']
+
+    volume_to_mesh = node_group.nodes.new('GeometryNodeVolumeToMesh')
+    volume_to_mesh.inputs['Threshold'].default_value = p['threshold']
+    volume_to_mesh.inputs['Adaptivity'].default_value = p['adaptivity']
+
+    node_group.links.new(group_in.outputs[0], mesh_to_points.inputs[0])
+    node_group.links.new(mesh_to_points.outputs[0], points_to_volume.inputs[0])
+    node_group.links.new(points_to_volume.outputs[0], volume_to_mesh.inputs[0])
+    node_group.links.new(volume_to_mesh.outputs[0], group_out.inputs[0])
+
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+
+    bpy.ops.export_scene.gltf(filepath=p['output_mesh'], export_format='GLB', use_selection=True)
+    sys.exit(0)
+except Exception as e:
+    print(f"Blender script failed: {{e}}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+"""
+            with open(script_path, 'w') as f:
+                f.write(script)
+
+            _run_blender_script(script_path)
+
+            processed_mesh = trimesh_loader.load(output_mesh_path, force="mesh", process=False)
+            return (processed_mesh,)
