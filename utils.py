@@ -2722,7 +2722,11 @@ try:
     bpy.ops.mesh.select_all(action='SELECT')
     
     # 1. Protect UV boundaries: Mark seams from existing islands before welding
-    bpy.ops.uv.seams_from_islands()
+    if obj.data.uv_layers.active:
+        try:
+            bpy.ops.uv.seams_from_islands()
+        except:
+            pass
     
     # 2. Merge by distance to fix the "every face is an island" issue
     bpy.ops.mesh.remove_doubles(threshold=0.0001)
@@ -2735,19 +2739,36 @@ try:
         pass
     
     # 4. Optional Minimize Stretch
-    if p['minimize_stretch']:
-        bpy.ops.uv.minimize_stretch(iterations=p['stretch_iterations'], fill_holes=True, blend=1.0)
+    if p['minimize_stretch'] and obj.data.uv_layers.active:
+        try:
+            bpy.ops.uv.minimize_stretch(iterations=p['stretch_iterations'], fill_holes=True, blend=1.0)
+        except:
+            try:
+                bpy.ops.uv.minimize_stretch(iterations=p['stretch_iterations'])
+            except:
+                pass
     
     # 5. Pack Islands
-    bpy.ops.uv.pack_islands(
-        shape_method=p['shape_method'],
-        rotate=p['rotate_islands'],
-        rotate_method='ANY',
-        scale=True,
-        margin_method=p['margin_method'],
-        margin=p['margin'],
-        udim_source='ACTIVE_UDIM'
-    )
+    if obj.data.uv_layers.active:
+        try:
+            bpy.ops.uv.pack_islands(
+                shape_method=p['shape_method'],
+                rotate=p['rotate_islands'],
+                rotate_method='ANY',
+                scale=True,
+                margin_method=p['margin_method'],
+                margin=p['margin'],
+                udim_source='ACTIVE_UDIM'
+            )
+        except:
+            try:
+                bpy.ops.uv.pack_islands(
+                    rotate=p['rotate_islands'],
+                    scale=True,
+                    margin=p['margin']
+                )
+            except:
+                pass
     
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.shade_smooth()

@@ -199,10 +199,19 @@ try:
         bpy.ops.uv.select_all(action='SELECT')
 
         if p['refine_stretch']:
-            bpy.ops.uv.seams_from_islands()
-            bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['stretch_iterations'])
+            try:
+                bpy.ops.uv.seams_from_islands()
+            except:
+                pass
+            try:
+                bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['stretch_iterations'])
+            except:
+                pass
 
-        bpy.ops.uv.pack_islands(margin=p['island_margin'])
+        try:
+            bpy.ops.uv.pack_islands(margin=p['island_margin'])
+        except:
+            pass
         bpy.ops.object.mode_set(mode='OBJECT')
 
         bpy.ops.wm.obj_export(filepath=p['out_obj'], export_uv=True, export_normals=True, export_materials=False)
@@ -429,18 +438,30 @@ class BlenderUnwrap:
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.uv.select_all(action='SELECT')
     if p['refine_s']:
-        bpy.ops.uv.seams_from_islands()
-        bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
+        try:
+            bpy.ops.uv.seams_from_islands()
+        except:
+            pass
+        try:
+            bpy.ops.uv.unwrap(method='MINIMUM_STRETCH', iterations=p['min_stretch_i'], correct_aspect=p['correct_a'], margin=p['margin'])
+        except:
+            pass
 
     if p['do_blender_pack']:
-        if bpy.app.version >= (3, 6, 0):
-            if p['avg_scale']:
-                bpy.ops.uv.average_islands_scale()
-                bpy.ops.uv.pack_islands(margin=p['margin'], scale=True)
+        try:
+            if bpy.app.version >= (3, 6, 0):
+                if p['avg_scale']:
+                    try:
+                        bpy.ops.uv.average_islands_scale()
+                    except:
+                        pass
+                    bpy.ops.uv.pack_islands(margin=p['margin'], scale=True)
+                else:
+                    bpy.ops.uv.pack_islands(margin=p['margin'], scale=False)
             else:
-                bpy.ops.uv.pack_islands(margin=p['margin'], scale=False)
-        else:
-            bpy.ops.uv.pack_islands(margin=p['margin'], average_islands_scale=p['avg_scale'])
+                bpy.ops.uv.pack_islands(margin=p['margin'], average_islands_scale=p['avg_scale'])
+        except:
+            pass
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -500,10 +521,13 @@ try:
     bpy.ops.mesh.mark_seam(clear=True)
 
     if p['unwrap_m'] == 'Smart UV Project':
-        bpy.ops.uv.smart_project(angle_limit=p['angle_l'],
-        island_margin=p['margin'],
-        correct_aspect=p['correct_a'],
-        scale_to_bounds=True)
+        try:
+            bpy.ops.uv.smart_project(angle_limit=p['angle_l'],
+            island_margin=p['margin'],
+            correct_aspect=p['correct_a'],
+            scale_to_bounds=True)
+        except:
+            pass
 
     elif p['unwrap_m'] == 'Cube Projection':
         bpy.ops.uv.cube_project(cube_size=1.0,
