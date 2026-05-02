@@ -14,6 +14,7 @@ import folder_paths
 from .utils import (
     _run_blender_script,
     _run_mof_command,
+    generate_uv_preview_shared,
     get_blender_clean_mesh_func_script,
     get_mof_path,
 )
@@ -29,7 +30,7 @@ class MinistryOfFlatUnwrap:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "texture_resolution": (
+                "uv_preview_resolution": (
                     "INT",
                     {"default": 1024, "min": 256, "max": 8192, "step": 256},
                 ),
@@ -77,7 +78,7 @@ class MinistryOfFlatUnwrap:
     def unwrap(
         self,
         trimesh,
-        texture_resolution,
+        uv_preview_resolution,
         separate_hard_edges,
         aspect_ratio,
         use_normals,
@@ -144,7 +145,7 @@ except Exception as e:
                 cleaned_input_path,
                 mof_output_path,
                 "-RESOLUTION",
-                str(texture_resolution),
+                str(uv_preview_resolution),
                 "-SEPARATE",
                 str(separate_hard_edges).upper(),
                 "-ASPECT",
@@ -225,31 +226,13 @@ except Exception as e:
             processed_mesh = trimesh_loader.load(final_output_path, process=False)
 
             uv_preview = self.generate_uv_preview(
-                processed_mesh, texture_resolution, texture_resolution, export_uv_layout
+                processed_mesh, uv_preview_resolution, uv_preview_resolution, export_uv_layout
             )
 
             return (processed_mesh, uv_preview)
 
     def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
-        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
-        if export_layout and hasattr(mesh.visual, "uv") and len(mesh.visual.uv) > 0:
-            img = Image.new("RGB", (res_x, res_y), "black")
-            draw = ImageDraw.Draw(img)
-            if mesh.faces.shape[1] == 3:
-                for face in mesh.faces:
-                    points = [
-                        (
-                            mesh.visual.uv[i][0] * res_x,
-                            (1 - mesh.visual.uv[i][1]) * res_y,
-                        )
-                        for i in face
-                    ]
-                    points.append(points[0])
-                    draw.line(points, fill="white", width=1)
-            uv_layout_image = torch.from_numpy(
-                np.array(img).astype(np.float32) / 255.0
-            )[None,]
-        return uv_layout_image
+        return generate_uv_preview_shared(mesh, res_x, res_y, export_layout)
 
 
 class BlenderDecimate:
@@ -401,7 +384,7 @@ class BlenderUnwrap:
                 "unwrap_method": (cls.UNWRAP_METHODS, {"default": "Smart UV Project"}),
                 "pack_with_xatlas": ("BOOLEAN", {"default": False}),
                 "export_uv_layout": ("BOOLEAN", {"default": True}),
-                "texture_resolution": (cls.TEXTURE_RESOLUTIONS, {"default": "1024"}),
+                "uv_preview_resolution": (cls.TEXTURE_RESOLUTIONS, {"default": "1024"}),
                 "pixel_margin": ("INT", {"default": 0, "min": 0, "max": 64}),
                 "angle_limit": (
                     "FLOAT",
@@ -483,7 +466,7 @@ class BlenderUnwrap:
                 "refine_s": p.get("refine_with_minimum_stretch"),
                 "angle_l": p.get("angle_limit", 66.0) * (math.pi / 180.0),
                 "margin": p.get("pixel_margin", 0)
-                / int(p.get("texture_resolution", 1024)),
+                / int(p.get("uv_preview_resolution", 1024)),
                 "correct_a": p.get("correct_aspect"),
                 "min_stretch_i": p.get("min_stretch_iterations"),
                 "final_merge_dist": p.get("final_merge_distance"),
@@ -549,8 +532,8 @@ except Exception as e:
 
             uv_preview = self.generate_uv_preview(
                 final_mesh,
-                int(p.get("texture_resolution")),
-                int(p.get("texture_resolution")),
+                int(p.get("uv_preview_resolution")),
+                int(p.get("uv_preview_resolution")),
                 p.get("export_uv_layout"),
             )
             return (final_mesh, uv_preview)
@@ -577,8 +560,8 @@ except Exception as e:
             ):
                 uv_preview = self.generate_uv_preview(
                     unwrapped_mesh,
-                    int(p.get("texture_resolution")),
-                    int(p.get("texture_resolution")),
+                    int(p.get("uv_preview_resolution")),
+                    int(p.get("uv_preview_resolution")),
                     p.get("export_uv_layout"),
                 )
                 return (unwrapped_mesh, uv_preview)
@@ -595,7 +578,7 @@ except Exception as e:
                 "o": final_out,
                 "refine_s": p.get("refine_with_minimum_stretch"),
                 "margin": p.get("pixel_margin", 0)
-                / int(p.get("texture_resolution", 1024)),
+                / int(p.get("uv_preview_resolution", 1024)),
                 "correct_a": p.get("correct_aspect"),
                 "min_stretch_i": p.get("min_stretch_iterations"),
                 "final_merge_dist": p.get("final_merge_distance"),
@@ -634,8 +617,8 @@ except Exception as e:
             final_mesh = trimesh_loader.load(final_out, process=False)
             uv_preview = self.generate_uv_preview(
                 final_mesh,
-                int(p.get("texture_resolution")),
-                int(p.get("texture_resolution")),
+                int(p.get("uv_preview_resolution")),
+                int(p.get("uv_preview_resolution")),
                 p.get("export_uv_layout"),
             )
             return (final_mesh, uv_preview)
@@ -661,7 +644,7 @@ except Exception as e:
         atlas.add_mesh(vertices_np, faces_np, uvs=uvs_np)
 
         pack_options = xatlas.PackOptions()
-        pack_options.resolution = int(p.get("texture_resolution", 1024))
+        pack_options.resolution = int(p.get("uv_preview_resolution", 1024))
         pack_options.padding = p.get("pixel_margin", 0)
 
         atlas.generate(pack_options=pack_options)
@@ -677,25 +660,7 @@ except Exception as e:
         return packed_mesh
 
     def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
-        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
-        if export_layout and hasattr(mesh.visual, "uv") and len(mesh.visual.uv) > 0:
-            img = Image.new("RGB", (res_x, res_y), "black")
-            draw = ImageDraw.Draw(img)
-            if mesh.faces.shape[1] == 3:
-                for face in mesh.faces:
-                    points = [
-                        (
-                            mesh.visual.uv[i][0] * res_x,
-                            (1 - mesh.visual.uv[i][1]) * res_y,
-                        )
-                        for i in face
-                    ]
-                    points.append(points[0])
-                    draw.line(points, fill="white", width=1)
-            uv_layout_image = torch.from_numpy(
-                np.array(img).astype(np.float32) / 255.0
-            )[None,]
-        return uv_layout_image
+        return generate_uv_preview_shared(mesh, res_x, res_y, export_layout)
 
 
 class BlenderExportGLB:

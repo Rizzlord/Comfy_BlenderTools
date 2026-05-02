@@ -11,6 +11,28 @@ import uuid
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import pymeshlab
 
+def generate_uv_preview_shared(mesh, res_x, res_y, export_layout):
+    uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
+    if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
+        img = Image.new('RGB', (res_x, res_y), 'black')
+        draw = ImageDraw.Draw(img)
+        
+        uvs = mesh.visual.uv
+        if len(mesh.faces) > 0 and mesh.faces.shape[1] == 3:
+            for face in mesh.faces:
+                points = [
+                    (uvs[i][0] * res_x, (1 - uvs[i][1]) * res_y)
+                    for i in face
+                    if i < len(uvs)
+                ]
+                if len(points) == 3:
+                    draw.polygon(points, fill=(0, 180, 220))
+                    draw.line(points + [points[0]], fill=(255, 255, 255), width=1)
+        
+        img_array = np.array(img).astype(np.float32) / 255.0
+        uv_layout_image = torch.from_numpy(img_array)[None,]
+    return uv_layout_image
+
 def get_blender_path():
     blender_path = os.environ.get("BLENDER_EXE")
     
@@ -2629,13 +2651,13 @@ class BlenderUVPack:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "island_spacing": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 100.0, "step": 1.0}),
+                "island_spacing": ("FLOAT", {"default": 0.001, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "minimize_stretch": ("BOOLEAN", {"default": True}),
                 "stretch_iterations": ("INT", {"default": 10, "min": 1, "max": 100}),
                 "rotate_islands": ("BOOLEAN", {"default": True}),
                 "margin_method": (["SCALED", "ADD", "FRACTION"], {"default": "SCALED"}),
                 "shape_method": (["CONCAVE", "CONVEX", "AABB"], {"default": "CONCAVE"}),
-                "texture_resolution": ("INT", {"default": 1024, "min": 256, "max": 8192, "step": 256}),
+                "uv_preview_resolution": ("INT", {"default": 1024, "min": 256, "max": 8192, "step": 256}),
                 "export_uv_layout": ("BOOLEAN", {"default": True}),
             }
         }
@@ -2646,19 +2668,9 @@ class BlenderUVPack:
     CATEGORY = "Comfy_BlenderTools/Utils"
 
     def generate_uv_preview(self, mesh, res_x, res_y, export_layout):
-        uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
-        if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
-            img = Image.new('RGB', (res_x, res_y), 'black')
-            draw = ImageDraw.Draw(img)
-            if mesh.faces.shape[1] == 3:
-                for face in mesh.faces:
-                    points = [(mesh.visual.uv[i][0] * res_x, (1 - mesh.visual.uv[i][1]) * res_y) for i in face]
-                    points.append(points[0])
-                    draw.line(points, fill='white', width=1)
-            uv_layout_image = torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
-        return uv_layout_image
+        return generate_uv_preview_shared(mesh, res_x, res_y, export_layout)
 
-    def pack(self, trimesh, island_spacing, minimize_stretch, stretch_iterations, rotate_islands, margin_method="SCALED", shape_method="CONCAVE", texture_resolution=1024, export_uv_layout=True):
+    def pack(self, trimesh, island_spacing, minimize_stretch, stretch_iterations, rotate_islands, margin_method="SCALED", shape_method="CONCAVE", uv_preview_resolution=1024, export_uv_layout=True):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "input.obj")
             output_mesh_path = os.path.join(temp_dir, "output.obj")
@@ -2666,8 +2678,8 @@ class BlenderUVPack:
             
             trimesh.export(input_mesh_path)
 
-            # Convert spacing to Blender margin (normalized for 2048 resolution)
-            margin_val = island_spacing / 2048.0
+            # Convert spacing to Blender margin
+            margin_val = island_spacing
             
             params = {
                 'margin': margin_val,
@@ -2767,7 +2779,7 @@ except Exception as e:
                         packed_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
                     packed_mesh.visual.material = trimesh.visual.material
                     
-                uv_preview = self.generate_uv_preview(packed_mesh, texture_resolution, texture_resolution, export_uv_layout)
+                uv_preview = self.generate_uv_preview(packed_mesh, uv_preview_resolution, uv_preview_resolution, export_uv_layout)
                 return (packed_mesh, uv_preview)
             
             print("Warning: Blender UV packing failed, returning original mesh.")
