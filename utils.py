@@ -11,6 +11,96 @@ import uuid
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import pymeshlab
 
+
+def _cleanup_mesh_internal(mesh: trimesh_loader.Trimesh, fix_normals: bool = True) -> trimesh_loader.Trimesh:
+    cleaned = mesh.copy()
+    try:
+        cleaned.update_faces(cleaned.nondegenerate_faces())
+    except Exception:
+        pass
+    try:
+        cleaned.update_faces(cleaned.unique_faces())
+    except Exception:
+        pass
+    cleaned.remove_unreferenced_vertices()
+    if fix_normals:
+        cleaned.fix_normals()
+    return cleaned
+
+
+def _position_weld_groups(vertices: np.ndarray, tolerance: float) -> tuple[np.ndarray, np.ndarray]:
+    if len(vertices) == 0:
+        return np.empty((0, 3), dtype=np.int64), np.empty((0,), dtype=np.int64)
+    scale = 1.0 / max(float(tolerance), 1e-12)
+    quantized = np.round(np.asarray(vertices) * scale).astype(np.int64)
+    unique, inverse = np.unique(quantized, axis=0, return_inverse=True)
+    return unique, inverse
+
+
+def _weld_vertices_geometry_only(mesh: trimesh_loader.Trimesh, tolerance: float) -> trimesh_loader.Trimesh:
+    if tolerance <= 0.0 or len(mesh.vertices) == 0:
+        return mesh.copy()
+
+    _, inverse = _position_weld_groups(np.asarray(mesh.vertices), tolerance)
+    unique_count = int(inverse.max()) + 1 if len(inverse) > 0 else 0
+    if unique_count == len(mesh.vertices):
+        return mesh.copy()
+
+    accum = np.zeros((unique_count, 3), dtype=np.float64)
+    counts = np.zeros(unique_count, dtype=np.int64)
+    np.add.at(accum, inverse, np.asarray(mesh.vertices))
+    np.add.at(counts, inverse, 1)
+    counts = np.maximum(counts, 1)
+
+    new_vertices = accum / counts[:, None]
+    new_faces = inverse[np.asarray(mesh.faces)]
+
+    # Prepare to preserve visuals
+    new_visual = None
+    if hasattr(mesh, 'visual'):
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None and len(mesh.visual.vertex_colors) == len(mesh.vertices):
+            color_accum = np.zeros((unique_count, mesh.visual.vertex_colors.shape[1]), dtype=np.float64)
+            np.add.at(color_accum, inverse, np.asarray(mesh.visual.vertex_colors))
+            new_colors = (color_accum / counts[:, None]).astype(mesh.visual.vertex_colors.dtype)
+            new_visual = trimesh_loader.visual.ColorVisuals(vertex_colors=new_colors)
+        
+        if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None and len(mesh.visual.uv) == len(mesh.vertices):
+            uv_accum = np.zeros((unique_count, 2), dtype=np.float64)
+            np.add.at(uv_accum, inverse, np.asarray(mesh.visual.uv))
+            new_uvs = uv_accum / counts[:, None]
+            
+            material = getattr(mesh.visual, 'material', None)
+            new_visual = trimesh_loader.visual.texture.TextureVisuals(uv=new_uvs, material=material)
+
+    welded = trimesh_loader.Trimesh(
+        vertices=new_vertices,
+        faces=new_faces,
+        visual=new_visual,
+        process=False,
+    )
+    return _cleanup_mesh_internal(welded, fix_normals=False)
+
+
+def _clean_mesh_for_remesh(mesh: trimesh_loader.Trimesh, merge_distance: float = 1e-5) -> trimesh_loader.Trimesh:
+    if hasattr(mesh, 'dump'): # Is a scene
+        geoms = [g for g in mesh.geometry.values() if isinstance(g, trimesh_loader.Trimesh)]
+        if not geoms:
+            return mesh
+        # concatenate usually preserves materials if they are compatible
+        mesh = trimesh_loader.util.concatenate(geoms)
+        
+    mesh = _cleanup_mesh_internal(mesh, fix_normals=False)
+    tolerance = float(merge_distance)
+    
+    if tolerance > 0.0:
+        welded = _weld_vertices_geometry_only(mesh, tolerance)
+        if len(welded.vertices) != len(mesh.vertices):
+            print(f"[Comfy_BlenderTools] Pre-remesh clean: {len(mesh.vertices)} -> {len(welded.vertices)} vertices (dist {tolerance:g})")
+        mesh = welded
+        
+    return _cleanup_mesh_internal(mesh)
+
+
 def generate_uv_preview_shared(mesh, res_x, res_y, export_layout):
     uv_layout_image = torch.zeros((1, res_y, res_x, 3), dtype=torch.float32)
     if export_layout and hasattr(mesh.visual, 'uv') and len(mesh.visual.uv) > 0:
@@ -176,6 +266,7 @@ class Voxelize:
                 "trimesh": ("TRIMESH",),
                 "mode": (["Voxel", "Blocks", "Smooth", "Sharp"], {"default": "Voxel"}),
                 "smooth_shading": ("BOOLEAN", {"default": True}),
+                "merge_distance": ("FLOAT", {"default": 1e-5, "min": 0.0, "max": 1.0, "step": 1e-6, "tooltip": "Merge vertices within this distance before remeshing. Helps with topological connectivity."}),
             },
             "optional": {
                 "Voxel_Settings": ("GROUP",),
@@ -187,7 +278,9 @@ class Voxelize:
     FUNCTION = "remesh"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def remesh(self, trimesh, mode, smooth_shading, Voxel_Settings=None, Other_Modes_Settings=None):
+    def remesh(self, trimesh, mode, smooth_shading, merge_distance=1e-5, Voxel_Settings=None, Other_Modes_Settings=None):
+        # Pre-process mesh (cleaning and welding)
+        trimesh = _clean_mesh_for_remesh(trimesh, merge_distance=merge_distance)
         defaults = {
             'voxel_size': 0.0125, 'adaptivity': 0.0, 'octree_depth': 4,
             'scale': 0.9, 'remove_disconnected': True, 
@@ -1120,6 +1213,7 @@ class QuadriflowRemesh:
                 "trimesh": ("TRIMESH",),
                 "smooth_shading": ("BOOLEAN", {"default": True}),
                 "auto_scale_fix": ("BOOLEAN", {"default": True}),
+                "merge_distance": ("FLOAT", {"default": 1e-5, "min": 0.0, "max": 1.0, "step": 1e-6, "tooltip": "Merge vertices within this distance before remeshing. Helps with topological connectivity."}),
             },
             "optional": {
                 "Quadriflow_Settings": ("GROUP",),
@@ -1130,7 +1224,9 @@ class QuadriflowRemesh:
     FUNCTION = "remesh"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def remesh(self, trimesh, smooth_shading, auto_scale_fix, Quadriflow_Settings=None):
+    def remesh(self, trimesh, smooth_shading, auto_scale_fix, merge_distance=1e-5, Quadriflow_Settings=None):
+        # Pre-process mesh (cleaning and welding)
+        trimesh = _clean_mesh_for_remesh(trimesh, merge_distance=merge_distance)
         defaults = {
             'target_faces': 62000,
             'mode': 'FACES',
@@ -1279,6 +1375,7 @@ class Pyremesh:
                     "doc_string": "After remeshing, run a post-processing step to fill holes and make the mesh watertight.",
                     "default": True
                 }),
+                "merge_distance": ("FLOAT", {"default": 1e-5, "min": 0.0, "max": 1.0, "step": 1e-6, "tooltip": "Merge vertices within this distance before remeshing. Helps with topological connectivity."}),
             }
         }
 
@@ -1286,7 +1383,9 @@ class Pyremesh:
     FUNCTION = "remesh"
     CATEGORY = "Comfy_BlenderTools/Utils"
 
-    def remesh(self, trimesh, target_faces, adaptive_sizing, adaptive_sensitivity, use_curvature_weighted, preserve_boundaries, preserve_features, feature_angle_deg, make_watertight):
+    def remesh(self, trimesh, target_faces, adaptive_sizing, adaptive_sensitivity, use_curvature_weighted, preserve_boundaries, preserve_features, feature_angle_deg, make_watertight, merge_distance=1e-5):
+        # Pre-process mesh (cleaning and welding)
+        trimesh = _clean_mesh_for_remesh(trimesh, merge_distance=merge_distance)
         import numpy as np
         ms = pymeshlab.MeshSet()
         pymeshlab_mesh = pymeshlab.Mesh(vertex_matrix=trimesh.vertices, face_matrix=trimesh.faces)
@@ -1345,7 +1444,7 @@ class Pyremesh:
 
         output_mesh = trimesh_loader.Trimesh(vertices=new_vertices, faces=new_faces, process=False)
         output_mesh.remove_unreferenced_vertices()
-        output_mesh.remove_degenerate_faces()
+        output_mesh.update_faces(output_mesh.nondegenerate_faces())
 
         if hasattr(trimesh, 'visual') and hasattr(trimesh.visual, 'material'):
             output_mesh.visual = trimesh_loader.visual.texture.TextureVisuals()
@@ -1377,6 +1476,7 @@ class O3DRemesh:
                     "default": 5, "min": 0, "max": 20, "step": 1
                 }),
                 "make_watertight": ("BOOLEAN", {"default": True}),
+                "merge_distance": ("FLOAT", {"default": 1e-5, "min": 0.0, "max": 1.0, "step": 1e-6, "tooltip": "Merge vertices within this distance before remeshing. Helps with topological connectivity."}),
             }
         }
 
@@ -1385,7 +1485,9 @@ class O3DRemesh:
     CATEGORY = "Comfy_BlenderTools/Utils"
 
     def o3d_remesh(self, trimesh, target_faces, method, poisson_depth, sample_points, 
-                      preserve_boundary, smooth_iterations, make_watertight):
+                      preserve_boundary, smooth_iterations, make_watertight, merge_distance=1e-5):
+        # Pre-process mesh (cleaning and welding)
+        trimesh = _clean_mesh_for_remesh(trimesh, merge_distance=merge_distance)
         try:
             import open3d as o3d
         except ImportError:
@@ -1606,6 +1708,7 @@ class InstantMeshes:
                     "default": 30.0, "min": 0.0, "max": 180.0, "step": 1.0
                 }),
                 "boundary_alignment": ("BOOLEAN", {"default": True}),
+                "merge_distance": ("FLOAT", {"default": 1e-5, "min": 0.0, "max": 1.0, "step": 1e-6, "tooltip": "Merge vertices within this distance before remeshing. Helps with topological connectivity."}),
             },
             "optional": {
             }
@@ -1614,6 +1717,7 @@ class InstantMeshes:
     RETURN_TYPES = ("TRIMESH",)
     FUNCTION = "run_instant_meshes"
     CATEGORY = "Comfy_BlenderTools/Utils"
+
 
     def get_instant_meshes_path(self):
         """Get Instant Meshes executable path from custom node folder"""
@@ -1923,9 +2027,12 @@ class InstantMeshes:
 
     def run_instant_meshes(self, trimesh, target_faces, make_watertight, 
                           simplify_before, simplify_ratio, adaptive_detail, orientation_symmetry, 
-                          position_symmetry, crease_angle, boundary_alignment):
+                          position_symmetry, crease_angle, boundary_alignment, merge_distance=1e-5):
         """Run Instant Meshes remeshing with iterative target adjustment and adaptive detail (always preprocessed)"""
         
+        # Pre-process mesh (cleaning and welding)
+        trimesh = _clean_mesh_for_remesh(trimesh, merge_distance=merge_distance)
+
         # Get executable path
         exe_path = self.get_instant_meshes_path()
         
