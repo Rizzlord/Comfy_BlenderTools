@@ -1130,6 +1130,16 @@ except Exception as e:
                 img = Image.open(path).convert("RGB")
                 return torch.from_numpy(np.array(img).astype(np.float32) / 255.0)[None,]
 
+            def load_normal_image_as_tensor(path):
+                if not os.path.exists(path):
+                    return None
+                img = Image.open(path).convert("RGBA")
+                img_array = np.array(img).astype(np.float32) / 255.0
+                cleaned = self._cleanup_normal_map_array(
+                    img_array[..., :3], img_array[..., 3]
+                )
+                return torch.from_numpy(cleaned)[None,]
+
             albedo_bake_tensor = load_image_as_tensor(
                 os.path.join(temp_dir, "albedo_map.png")
             )
@@ -1142,7 +1152,7 @@ except Exception as e:
             if blur_mr and mr_map_tensor is not None:
                 mr_map_tensor = self._blur_image_tensor(mr_map_tensor, mr_blur_strength)
 
-            normal_map_tensor = load_image_as_tensor(
+            normal_map_tensor = load_normal_image_as_tensor(
                 os.path.join(temp_dir, "normal_map.png")
             )
             ao_map_tensor = load_image_as_tensor(os.path.join(temp_dir, "ao_map.png"))
@@ -1265,6 +1275,64 @@ except Exception as e:
 
         result = torch.stack(blurred_batches, dim=0)
         return result.to(device=device, dtype=dtype)
+
+    @staticmethod
+    def _cleanup_normal_map_array(rgb_array, alpha_array=None):
+        rgb = np.asarray(rgb_array, dtype=np.float32).copy()
+        normals = rgb * 2.0 - 1.0
+        lengths = np.linalg.norm(normals, axis=2)
+
+        invalid_mask = lengths < 0.25
+        if alpha_array is not None:
+            invalid_mask |= np.asarray(alpha_array, dtype=np.float32) < 0.05
+
+        valid_mask = ~invalid_mask
+
+        if np.any(valid_mask):
+            safe_lengths = np.maximum(lengths[valid_mask], 1e-8)[:, None]
+            normals[valid_mask] = normals[valid_mask] / safe_lengths
+
+            height, width = valid_mask.shape
+            for _ in range(2):
+                missing_mask = ~valid_mask
+                if not np.any(missing_mask):
+                    break
+
+                padded_normals = np.pad(
+                    normals, ((1, 1), (1, 1), (0, 0)), mode="edge"
+                )
+                padded_valid = np.pad(
+                    valid_mask, ((1, 1), (1, 1)), mode="constant", constant_values=False
+                )
+
+                accum = np.zeros_like(normals, dtype=np.float32)
+                counts = np.zeros((height, width), dtype=np.float32)
+
+                for oy in (-1, 0, 1):
+                    for ox in (-1, 0, 1):
+                        if oy == 0 and ox == 0:
+                            continue
+                        neighbor_valid = padded_valid[
+                            1 + oy : 1 + oy + height, 1 + ox : 1 + ox + width
+                        ]
+                        neighbor_normals = padded_normals[
+                            1 + oy : 1 + oy + height, 1 + ox : 1 + ox + width
+                        ]
+                        accum += neighbor_normals * neighbor_valid[..., None]
+                        counts += neighbor_valid.astype(np.float32)
+
+                adopt_mask = missing_mask & (counts > 0.0)
+                if not np.any(adopt_mask):
+                    break
+
+                averaged = accum[adopt_mask] / counts[adopt_mask, None]
+                averaged_lengths = np.linalg.norm(averaged, axis=1, keepdims=True)
+                normals[adopt_mask] = averaged / np.maximum(averaged_lengths, 1e-8)
+                valid_mask[adopt_mask] = True
+
+        normals[~valid_mask] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        cleaned_rgb = np.clip(normals * 0.5 + 0.5, 0.0, 1.0)
+        return cleaned_rgb.astype(np.float32)
 
 
 class ApplyMaterial:
