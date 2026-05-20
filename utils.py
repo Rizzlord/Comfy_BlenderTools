@@ -237,11 +237,30 @@ def _run_mof_command(command, cwd=None):
     except Exception as e:
         raise RuntimeError(f"An unexpected error occurred while running Ministry of Flat: {e}")
         
+def build_blender_cmd(blender_exe, factory_startup=False):
+    import re
+    cmd = [blender_exe]
+    if factory_startup:
+        cmd.append("--factory-startup")
+    try:
+        res = subprocess.run([blender_exe, "--version"], capture_output=True, text=True, timeout=5)
+        match = re.search(r"Blender\s+(\d+)\.(\d+)", res.stdout)
+        if match:
+            major = int(match.group(1))
+            if major >= 4:
+                cmd.extend(["--gpu-backend", "opengl"])
+    except Exception:
+        pass
+    return cmd
+
+
 def _run_blender_script(script_path):
     blender_exe = get_blender_path()
     try:
+        cmd = build_blender_cmd(blender_exe, factory_startup=True)
+        cmd.extend(["--background", "--python", script_path])
         result = subprocess.run(
-            [blender_exe, '--factory-startup', '--background', '--python', script_path],
+            cmd,
             check=True, capture_output=True, text=True
         )
         if result.stdout:
@@ -2523,7 +2542,8 @@ except Exception as e:
             try:
                 # Run Blender script
                 blender_exe = get_blender_path()
-                cmd = [blender_exe, "--background", "--python", script_file]
+                cmd = build_blender_cmd(blender_exe, factory_startup=False)
+                cmd.extend(["--background", "--python", script_file])
                 
                 result = subprocess.run(
                     cmd,

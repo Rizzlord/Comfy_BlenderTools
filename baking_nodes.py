@@ -31,7 +31,7 @@ class TextureBake:
                 "bake_ao": ("BOOLEAN", {"default": True}),
                 "ao_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.1, "max": 5.0, "step": 0.1},
+                    {"default": 5.0, "min": 0.1, "max": 10.0, "step": 0.1},
                 ),
                 "bake_thickness": ("BOOLEAN", {"default": True}),
                 "thickness_strength": (
@@ -45,11 +45,11 @@ class TextureBake:
                 ),
                 "cage_extrusion": (
                     "FLOAT",
-                    {"default": 0.02, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
                 "max_ray_distance": (
                     "FLOAT",
-                    {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
                 "margin": ("INT", {"default": 1024, "min": 0, "max": 2048}),
                 "use_high_poly_textures": ("BOOLEAN", {"default": False}),
@@ -231,11 +231,14 @@ class TextureBake:
 import sys, traceback
 try:
     import bpy, os, bmesh, numpy as np
+    from mathutils import Vector
 except Exception as e:
     print(f"Failed to import Blender dependencies: {{e}}", file=sys.stderr)
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 p = {{ {", ".join(f'"{k}": r"{v}"' if isinstance(v, str) else f'"{k}": {v}' for k, v in params.items())} }}
+auto_bake_settings = {{"cage_extrusion": None, "max_ray_distance": None}}
+shared_bake_cage = None
 
 def setup_gpu():
     if not p['use_gpu']:
@@ -276,18 +279,152 @@ def setup_scene():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
 
-def import_meshes():
-    bpy.ops.wm.obj_import(filepath=p['high_poly_path'])
-    high_obj = bpy.context.selected_objects[0]; high_obj.name = "HighPoly"
-    sanitize_for_bake(high_obj, 0.0001)
+def import_obj_as_single_mesh(filepath, object_name):
+    existing_names = {{obj.name for obj in bpy.context.scene.objects}}
+    bpy.ops.wm.obj_import(filepath=filepath)
+    imported_meshes = [
+        obj for obj in bpy.context.scene.objects
+        if obj.name not in existing_names and obj.type == 'MESH'
+    ]
+    if not imported_meshes:
+        raise Exception(f"No mesh objects were imported from: {{filepath}}")
 
-    bpy.ops.wm.obj_import(filepath=p['low_poly_path'])
-    low_obj = bpy.context.selected_objects[0]; low_obj.name = "LowPoly"
-    sanitize_for_bake(low_obj, 0.0001)
-    
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in imported_meshes:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = imported_meshes[0]
+    bpy.context.view_layer.update()
+
+    if len(imported_meshes) > 1:
+        bpy.ops.object.join()
+
+    obj = bpy.context.view_layer.objects.active
+    obj.name = object_name
+    sanitize_for_bake(obj, 0.0001)
+    return obj
+
+def get_world_bounds(obj):
+    corners = np.array(
+        [[coord for coord in (obj.matrix_world @ Vector(corner))] for corner in obj.bound_box],
+        dtype=np.float64,
+    )
+    return corners.min(axis=0), corners.max(axis=0)
+
+def get_object_diagonal(obj):
+    bounds_min, bounds_max = get_world_bounds(obj)
+    return float(np.linalg.norm(bounds_max - bounds_min))
+
+def align_meshes(high_obj, low_obj):
+    low_obj.rotation_mode = high_obj.rotation_mode
+    low_obj.location = high_obj.location.copy()
+    if hasattr(high_obj, "rotation_quaternion") and high_obj.rotation_mode == 'QUATERNION':
+        low_obj.rotation_quaternion = high_obj.rotation_quaternion.copy()
+    else:
+        low_obj.rotation_euler = high_obj.rotation_euler.copy()
+    low_obj.scale = high_obj.scale.copy()
+    bpy.context.view_layer.update()
+
+    high_min, high_max = get_world_bounds(high_obj)
+    low_min, low_max = get_world_bounds(low_obj)
+    high_center = (high_min + high_max) * 0.5
+    low_center = (low_min + low_max) * 0.5
+    offset = high_center - low_center
+    if float(np.linalg.norm(offset)) > 1e-6:
+        low_obj.location.x += float(offset[0])
+        low_obj.location.y += float(offset[1])
+        low_obj.location.z += float(offset[2])
+        bpy.context.view_layer.update()
+
+    high_min, high_max = get_world_bounds(high_obj)
+    low_min, low_max = get_world_bounds(low_obj)
+    print(
+        "Bake alignment centers high="
+        + str(((high_min + high_max) * 0.5).tolist())
+        + " low="
+        + str(((low_min + low_max) * 0.5).tolist())
+    )
+
+def sample_surface_distances(source_obj, target_obj, sample_limit=2048):
+    distances = []
+    source_vertices = getattr(getattr(source_obj, "data", None), "vertices", None)
+    if source_vertices is None or len(source_vertices) == 0:
+        return distances
+
+    vertex_count = len(source_vertices)
+    sample_count = min(vertex_count, int(sample_limit))
+    if sample_count <= 0:
+        return distances
+
+    if sample_count == vertex_count:
+        sample_indices = range(vertex_count)
+    else:
+        sample_indices = np.linspace(0, vertex_count - 1, num=sample_count, dtype=np.int32)
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    target_eval = target_obj.evaluated_get(depsgraph)
+    target_world_inv = target_eval.matrix_world.inverted()
+
+    for idx in sample_indices:
+        try:
+            source_vertex = source_vertices[int(idx)]
+            world_co = source_obj.matrix_world @ source_vertex.co
+            target_local_co = target_world_inv @ world_co
+            hit_result = target_eval.closest_point_on_mesh(target_local_co)
+            if not hit_result:
+                continue
+            hit = bool(hit_result[0])
+            if not hit:
+                continue
+            hit_location_world = target_eval.matrix_world @ hit_result[1]
+            distances.append(float((world_co - hit_location_world).length))
+        except Exception:
+            continue
+
+    return distances
+
+def estimate_bake_settings(high_obj, low_obj):
+    diag = max(get_object_diagonal(high_obj), get_object_diagonal(low_obj), 1e-4)
+    min_cage = max(diag * 0.001, 0.0005)
+    min_ray = max(diag * 0.0015, min_cage * 1.25)
+
+    sampled_distances = sample_surface_distances(low_obj, high_obj)
+    if sampled_distances:
+        sampled_array = np.asarray(sampled_distances, dtype=np.float64)
+        p90 = float(np.quantile(sampled_array, 0.90))
+        p98 = float(np.quantile(sampled_array, 0.98))
+        auto_cage = max(min_cage, p90 * 1.1, p98 * 1.02)
+        auto_ray = max(min_ray, p98 * 1.35, auto_cage * 1.2)
+        print(
+            "Auto bake settings from sampled distances: "
+            + f"p90={{p90:.6f}}, p98={{p98:.6f}}, "
+            + f"cage={{auto_cage:.6f}}, ray={{auto_ray:.6f}}"
+        )
+    else:
+        auto_cage = max(min_cage, diag * 0.0025)
+        auto_ray = max(min_ray, auto_cage * 1.5)
+        print(
+            "Auto bake settings fallback from bounds: "
+            + f"diag={{diag:.6f}}, cage={{auto_cage:.6f}}, ray={{auto_ray:.6f}}"
+        )
+
+    if float(p['cage_extrusion']) > 0.0:
+        auto_cage = float(p['cage_extrusion'])
+    if float(p['max_ray_distance']) > 0.0:
+        auto_ray = float(p['max_ray_distance'])
+
+    return {{
+        "cage_extrusion": float(auto_cage),
+        "max_ray_distance": float(auto_ray),
+    }}
+
+def import_meshes():
+    high_obj = import_obj_as_single_mesh(p['high_poly_path'], "HighPoly")
+    low_obj = import_obj_as_single_mesh(p['low_poly_path'], "LowPoly")
+    align_meshes(high_obj, low_obj)
+
     if not low_obj.data.uv_layers:
         raise Exception("Low-poly mesh has no UV map. Please use the BlenderUnwrap node first.")
-        
+
     return high_obj, low_obj
 
 def setup_lowpoly_material(low_obj):
@@ -297,8 +434,13 @@ def setup_lowpoly_material(low_obj):
     else: low_obj.data.materials.append(mat)
     
     nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
     nodes.clear()
+    output = nodes.new('ShaderNodeOutputMaterial')
+    principled = nodes.new('ShaderNodeBsdfPrincipled')
+    links.new(principled.outputs['BSDF'], output.inputs['Surface'])
     tex_node = nodes.new('ShaderNodeTexImage')
+    tex_node.name = "TextureBake_Target"
     nodes.active = tex_node
     return mat, tex_node
 
@@ -530,6 +672,166 @@ def duplicate_clean_for_normal(obj, name_suffix, merge_distance=0.0001):
     sanitize_for_bake(dup, merge_distance)
     return dup
 
+def configure_normal_bake_mesh(obj, clear_sharp=False):
+    if obj is None:
+        return
+
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        if clear_sharp:
+            try:
+                bpy.ops.mesh.mark_sharp(clear=True)
+            except Exception as exc_sharp:
+                print(f"Failed to clear sharp edges on {{obj.name}}: {{exc_sharp}}")
+        try:
+            bpy.ops.mesh.normals_make_consistent(inside=False)
+        except Exception as exc_normals:
+            print(f"Failed to recalculate normals on {{obj.name}}: {{exc_normals}}")
+    finally:
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+    data = getattr(obj, "data", None)
+    if data is not None:
+        if hasattr(data, "use_auto_smooth"):
+            data.use_auto_smooth = True
+        if hasattr(data, "auto_smooth_angle"):
+            data.auto_smooth_angle = float(np.pi)
+
+    try:
+        bpy.ops.object.shade_smooth_by_angle(angle=float(np.pi), keep_sharp_edges=True)
+    except Exception:
+        try:
+            bpy.ops.object.shade_smooth()
+        except Exception as exc_smooth:
+            print(f"Failed to smooth shading on {{obj.name}}: {{exc_smooth}}")
+
+def apply_object_modifier(obj, modifier_name):
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.context.view_layer.update()
+    bpy.ops.object.modifier_apply(modifier=modifier_name)
+
+def create_explicit_bake_cage(low_source_obj, high_source_obj, name_suffix, cage_offset):
+    if low_source_obj is None or high_source_obj is None:
+        return None
+
+    cage = duplicate_clean_for_normal(low_source_obj, name_suffix, 0.0)
+    if cage is None:
+        return None
+
+    cage.hide_render = True
+    try:
+        cage.display_type = 'WIRE'
+    except Exception:
+        pass
+
+    configure_normal_bake_mesh(cage, clear_sharp=False)
+
+    project_modifier = None
+    try:
+        project_modifier = cage.modifiers.new(name="BakeCageProject", type='SHRINKWRAP')
+        project_modifier.target = high_source_obj
+        if hasattr(project_modifier, "wrap_method"):
+            try:
+                project_modifier.wrap_method = 'PROJECT'
+            except Exception:
+                project_modifier.wrap_method = 'NEAREST_SURFACEPOINT'
+        if hasattr(project_modifier, "wrap_mode"):
+            try:
+                project_modifier.wrap_mode = 'OUTSIDE'
+            except Exception:
+                pass
+        for axis_name in ("x", "y", "z"):
+            attr = f"use_project_{{axis_name}}"
+            if hasattr(project_modifier, attr):
+                setattr(project_modifier, attr, True)
+        if hasattr(project_modifier, "use_positive_direction"):
+            project_modifier.use_positive_direction = True
+        if hasattr(project_modifier, "use_negative_direction"):
+            project_modifier.use_negative_direction = True
+        if hasattr(project_modifier, "cull_face"):
+            try:
+                project_modifier.cull_face = 'OFF'
+            except Exception:
+                pass
+        if hasattr(project_modifier, "offset"):
+            project_modifier.offset = max(float(cage_offset) * 0.15, 0.0002)
+        apply_object_modifier(cage, project_modifier.name)
+    except Exception as exc_project:
+        print(f"Failed to project bake cage {{name_suffix}}: {{exc_project}}")
+
+    push_amount = max(float(cage_offset) * 0.85, 0.0005)
+    try:
+        bpy.ops.object.select_all(action='DESELECT')
+        cage.select_set(True)
+        bpy.context.view_layer.objects.active = cage
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        try:
+            bpy.ops.transform.shrink_fatten(value=push_amount, use_even_offset=True)
+        except TypeError:
+            bpy.ops.transform.shrink_fatten(value=push_amount)
+    except Exception as exc_push:
+        print(f"Failed to inflate bake cage {{name_suffix}}: {{exc_push}}")
+    finally:
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+    configure_normal_bake_mesh(cage, clear_sharp=False)
+    return cage
+
+def ensure_bake_target_node(target_obj, bake_image):
+    if target_obj is None:
+        raise RuntimeError("Bake target object is missing.")
+
+    if not target_obj.data.materials:
+        target_mat, target_tex_node = setup_lowpoly_material(target_obj)
+    else:
+        target_mat = target_obj.data.materials[0]
+        if target_mat is None:
+            target_mat, target_tex_node = setup_lowpoly_material(target_obj)
+        else:
+            target_mat.use_nodes = True
+            nodes = target_mat.node_tree.nodes
+            links = target_mat.node_tree.links
+
+            output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None)
+            if output is None:
+                output = nodes.new('ShaderNodeOutputMaterial')
+
+            principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+            if principled is None:
+                principled = nodes.new('ShaderNodeBsdfPrincipled')
+
+            has_surface_link = any(
+                link.from_node == principled
+                and link.to_node == output
+                and link.to_socket == output.inputs['Surface']
+                for link in links
+            )
+            if not has_surface_link:
+                links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+
+            target_tex_node = nodes.get("TextureBake_Target")
+            if target_tex_node is None or target_tex_node.type != 'TEX_IMAGE':
+                target_tex_node = nodes.new('ShaderNodeTexImage')
+                target_tex_node.name = "TextureBake_Target"
+
+    target_tex_node.image = bake_image
+    target_mat.node_tree.nodes.active = target_tex_node
+    return target_tex_node
+
 def process_and_save_map(image, output_path, invert=False, strength=1.0, white_bg=False):
     width, height = image.size[0], image.size[1]
     channels = getattr(image, "channels", 4)
@@ -557,26 +859,45 @@ def process_and_save_map(image, output_path, invert=False, strength=1.0, white_b
     out_img.save()
     bpy.data.images.remove(out_img)
 
-def execute_bake(bake_type, tex_node, source_obj=None, target_obj=None):
+def execute_bake(bake_type, tex_node, source_obj=None, target_obj=None, cage_obj=None):
     res = p['resolution']
     bake_image = bpy.data.images.new(name=f"{{bake_type}}_BakeImage", width=res, height=res, alpha=True)
-    tex_node.image = bake_image
 
     tgt = target_obj if target_obj is not None else low_obj
     src = source_obj if source_obj is not None else high_obj
+    effective_cage = cage_obj if cage_obj is not None else shared_bake_cage
+    effective_cage_extrusion = auto_bake_settings.get('cage_extrusion') or float(p['cage_extrusion'])
+    effective_max_ray_distance = auto_bake_settings.get('max_ray_distance') or float(p['max_ray_distance'])
+    ensure_bake_target_node(tgt, bake_image)
     bpy.ops.object.select_all(action='DESELECT')
     if src is not None:
         src.select_set(True)
     if tgt is not None:
         tgt.select_set(True)
         bpy.context.view_layer.objects.active = tgt
+    bpy.context.view_layer.update()
+
+    if src is not None and tgt is not None:
+        src_min, src_max = get_world_bounds(src)
+        tgt_min, tgt_max = get_world_bounds(tgt)
+        src_center = (src_min + src_max) * 0.5
+        tgt_center = (tgt_min + tgt_max) * 0.5
+        print(
+            f"Executing {{bake_type}} bake. Source center={{src_center.tolist()}}, "
+            f"target center={{tgt_center.tolist()}}"
+        )
     
     bake_kwargs = {{
         'type': bake_type, 'use_selected_to_active': True,
-        'margin': p['margin'], 'cage_extrusion': p['cage_extrusion'], 'use_clear': True,
+        'margin': p['margin'], 'use_clear': True,
     }}
-    if p['max_ray_distance'] > 0.0:
-        bake_kwargs['max_ray_distance'] = p['max_ray_distance']
+    if effective_cage is not None:
+        bake_kwargs['use_cage'] = True
+        bake_kwargs['cage_object'] = effective_cage.name
+    else:
+        bake_kwargs['cage_extrusion'] = effective_cage_extrusion
+    if effective_max_ray_distance > 0.0 and effective_cage is None:
+        bake_kwargs['max_ray_distance'] = effective_max_ray_distance
     if bake_type == 'NORMAL':
         bake_kwargs['normal_space'] = 'TANGENT'
 
@@ -587,6 +908,13 @@ try:
     setup_scene()
     high_obj, low_obj = import_meshes()
     apply_highpoly_textures(high_obj)
+    auto_bake_settings = estimate_bake_settings(high_obj, low_obj)
+    shared_bake_cage = create_explicit_bake_cage(
+        low_obj,
+        high_obj,
+        "LowPoly_BakeCage",
+        auto_bake_settings['cage_extrusion'],
+    )
     low_poly_mat, tex_node = setup_lowpoly_material(low_obj)
 
     if p['bake_albedo']:
@@ -620,10 +948,28 @@ try:
 
     if p['bake_normal']:
         normal_high_obj = duplicate_clean_for_normal(high_obj, "HighPoly_NormalBake", 0.0001)
-        normal_low_obj = duplicate_clean_for_normal(low_obj, "LowPoly_NormalBake", 0.0001)
-        cleanup_objs = [o for o in (normal_high_obj, normal_low_obj) if o is not None]
+        normal_low_obj = duplicate_clean_for_normal(low_obj, "LowPoly_NormalBake", 0.0)
+        normal_source_obj = normal_high_obj or high_obj
+        normal_target_obj = normal_low_obj or low_obj
+        configure_normal_bake_mesh(normal_source_obj, clear_sharp=False)
+        configure_normal_bake_mesh(normal_target_obj, clear_sharp=False)
+        normal_cage_obj = create_explicit_bake_cage(
+            normal_target_obj,
+            normal_source_obj,
+            "LowPoly_NormalCage",
+            max(float(auto_bake_settings['cage_extrusion']), 0.001),
+        )
+        cleanup_objs = [
+            o for o in (normal_high_obj, normal_low_obj, normal_cage_obj) if o is not None
+        ]
         try:
-            normal_image = execute_bake('NORMAL', tex_node, source_obj=normal_high_obj or high_obj, target_obj=normal_low_obj or low_obj)
+            normal_image = execute_bake(
+                'NORMAL',
+                tex_node,
+                source_obj=normal_source_obj,
+                target_obj=normal_target_obj,
+                cage_obj=normal_cage_obj,
+            )
             output_path = os.path.join(p['temp_dir'], "normal_map.png")
             normal_image.filepath_raw = output_path
             normal_image.file_format = 'PNG'; normal_image.save()
@@ -720,6 +1066,12 @@ try:
         raise RuntimeError(f"glTF export did not produce file: {{p['final_low_poly_path']}}")
 
     log('Exported GLB: ' + p['final_low_poly_path'])
+
+    if shared_bake_cage is not None:
+        try:
+            bpy.data.objects.remove(shared_bake_cage, do_unlink=True)
+        except Exception as exc:
+            print(f"Failed to remove shared bake cage: {{exc}}")
 
     sys.exit(0)
 except Exception as e:
