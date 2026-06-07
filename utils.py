@@ -2577,6 +2577,9 @@ class BlenderPreview:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
+                "render_mode": (["All", "Colored", "Solid", "Normal"], {"default": "All"}),
+                "resolution": (["512", "1k", "2k", "4k"], {"default": "2k"}),
+                "padding": ("INT", {"default": 0, "min": -100, "max": 100, "step": 1}),
             }
         }
 
@@ -2585,10 +2588,10 @@ class BlenderPreview:
     FUNCTION = "render_thumbnails"
     CATEGORY = "Comfy_BlenderTools/Preview"
 
-    def _load_image_to_tensor(self, image_path):
+    def _load_image_to_tensor(self, image_path, res):
         if not os.path.exists(image_path):
             print(f"Warning: Output image not found at {image_path}. Returning black image.")
-            return torch.zeros((1, 2048, 2048, 3), dtype=torch.float32)
+            return torch.zeros((1, res, res, 3), dtype=torch.float32)
         
         try:
             img = Image.open(image_path)
@@ -2598,9 +2601,12 @@ class BlenderPreview:
             return torch.from_numpy(img_np).unsqueeze(0)
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
-            return torch.zeros((1, 2048, 2048, 3), dtype=torch.float32)
+            return torch.zeros((1, res, res, 3), dtype=torch.float32)
 
-    def render_thumbnails(self, trimesh):
+    def render_thumbnails(self, trimesh, render_mode, resolution, padding):
+        res_map = {"512": 512, "1k": 1024, "2k": 2048, "4k": 4096}
+        res = res_map.get(resolution, 2048)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "input_mesh.glb")
             trimesh.export(file_obj=input_mesh_path)
@@ -2615,10 +2621,13 @@ class BlenderPreview:
                 'material_output': repr(material_output_path.replace('\\', '/')),
                 'wireframe_output': repr(wireframe_output_path.replace('\\', '/')),
                 'normal_output': repr(normal_output_path.replace('\\', '/')),
+                'render_mode': repr(render_mode),
+                'res': str(res),
+                'padding': str(padding),
             }
 
             blender_script = f"""
-import bpy, sys, os
+import bpy, sys, os, math
 from math import radians
 from mathutils import Vector
 
@@ -2628,8 +2637,9 @@ try:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
-    scene.render.resolution_x = 2048
-    scene.render.resolution_y = 2048
+    res = int(p['res'])
+    scene.render.resolution_x = res
+    scene.render.resolution_y = res
     scene.render.film_transparent = True
     scene.cycles.samples = 128
     scene.cycles.use_denoising = True
@@ -2638,17 +2648,22 @@ try:
         cprefs = bpy.context.preferences.addons['cycles'].preferences
         cprefs.get_devices()
         
-        for device_type in ('CUDA', 'OPTIX', 'HIP', 'METAL'):
-            if any(d.type == device_type for d in cprefs.devices):
-                cprefs.compute_device_type = device_type
+        device_type_found = None
+        for dtype in ('OPTIX', 'CUDA', 'HIP', 'ONEAPI', 'METAL'):
+            if any(d.type == dtype for d in cprefs.devices):
+                cprefs.compute_device_type = dtype
+                device_type_found = dtype
                 break
         
-        for device in cprefs.devices:
-            if device.type == cprefs.compute_device_type:
-                device.use = True
-
-        scene.cycles.device = 'GPU'
-        print(f"Successfully configured GPU for rendering with {{cprefs.compute_device_type}}.")
+        if device_type_found:
+            for device in cprefs.devices:
+                if device.type == device_type_found or device.type != 'CPU':
+                    device.use = True
+            scene.cycles.device = 'GPU'
+            print(f"Successfully configured GPU for rendering with {{device_type_found}}.")
+        else:
+            print("No compatible GPU devices found. Using CPU.")
+            scene.cycles.device = 'CPU'
     except Exception as e:
         print(f"GPU rendering setup failed: {{e}}")
         print("Falling back to CPU.")
@@ -2673,9 +2688,17 @@ try:
         obj.location = (0, 0, 0)
         obj.rotation_euler = (0, 0, 0)
         
-        max_dim = max(obj.dimensions)
+        radius = max(Vector(corner).length for corner in obj.bound_box)
+        fov = camera_obj.data.angle
+        res = int(p['res'])
+        padding_val = int(p['padding'])
+        if padding_val == 0:
+            distance = radius / math.sin((fov / 2.0) * max(1.0, res - 20.0) / res)
+        else:
+            distance = (radius / math.sin(fov / 2.0)) * (1.0 + padding_val / 100.0)
         
-        camera_obj.location = Vector((0, -max_dim * 2.5, max_dim * 0.5))
+        direction = Vector((0.0, -2.5, 0.5)).normalized()
+        camera_obj.location = direction * distance
 
         constraint = camera_obj.constraints.new(type='TRACK_TO')
         constraint.target = empty_target
@@ -2701,56 +2724,59 @@ try:
     rim_constraint = rim_light.constraints.new(type='TRACK_TO')
     rim_constraint.target = empty_target
 
-    scene.view_layers[0].material_override = None
-    scene.render.filepath = p['material_output']
-    bpy.ops.render.render(write_still=True)
+    if p['render_mode'] in ('All', 'Colored'):
+        scene.view_layers[0].material_override = None
+        scene.render.filepath = p['material_output']
+        bpy.ops.render.render(write_still=True)
     
-    wire_mat = bpy.data.materials.new(name="WireframeMaterial")
-    wire_mat.use_nodes = True
-    nodes = wire_mat.node_tree.nodes
-    nodes.clear()
-    output_node = nodes.new(type='ShaderNodeOutputMaterial')
-    emission_node = nodes.new(type='ShaderNodeEmission')
-    emission_node.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
-    mix_shader = nodes.new(type='ShaderNodeMixShader')
-    wire_node = nodes.new(type='ShaderNodeWireframe')
-    wire_node.inputs['Size'].default_value = 0.005
-    transparent_node = nodes.new(type='ShaderNodeBsdfTransparent')
-    
-    wire_mat.node_tree.links.new(wire_node.outputs['Fac'], mix_shader.inputs['Fac'])
-    wire_mat.node_tree.links.new(transparent_node.outputs['BSDF'], mix_shader.inputs[1])
-    wire_mat.node_tree.links.new(emission_node.outputs['Emission'], mix_shader.inputs[2])
-    wire_mat.node_tree.links.new(mix_shader.outputs['Shader'], output_node.inputs['Surface'])
-    
-    scene.view_layers[0].material_override = wire_mat
-    scene.render.filepath = p['wireframe_output']
-    bpy.ops.render.render(write_still=True)
+    if p['render_mode'] in ('All', 'Solid'):
+        wire_mat = bpy.data.materials.new(name="WireframeMaterial")
+        wire_mat.use_nodes = True
+        nodes = wire_mat.node_tree.nodes
+        nodes.clear()
+        output_node = nodes.new(type='ShaderNodeOutputMaterial')
+        emission_node = nodes.new(type='ShaderNodeEmission')
+        emission_node.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+        mix_shader = nodes.new(type='ShaderNodeMixShader')
+        wire_node = nodes.new(type='ShaderNodeWireframe')
+        wire_node.inputs['Size'].default_value = 0.005
+        transparent_node = nodes.new(type='ShaderNodeBsdfTransparent')
+        
+        wire_mat.node_tree.links.new(wire_node.outputs['Fac'], mix_shader.inputs['Fac'])
+        wire_mat.node_tree.links.new(transparent_node.outputs['BSDF'], mix_shader.inputs[1])
+        wire_mat.node_tree.links.new(emission_node.outputs['Emission'], mix_shader.inputs[2])
+        wire_mat.node_tree.links.new(mix_shader.outputs['Shader'], output_node.inputs['Surface'])
+        
+        scene.view_layers[0].material_override = wire_mat
+        scene.render.filepath = p['wireframe_output']
+        bpy.ops.render.render(write_still=True)
 
-    normal_mat = bpy.data.materials.new(name="NormalMaterial")
-    normal_mat.use_nodes = True
-    nodes = normal_mat.node_tree.nodes
-    nodes.clear()
-    output_node = nodes.new(type='ShaderNodeOutputMaterial')
-    geo_node = nodes.new(type='ShaderNodeNewGeometry')
-    vec_transform_node = nodes.new(type='ShaderNodeVectorTransform')
-    vec_math_scale = nodes.new(type='ShaderNodeVectorMath')
-    vec_math_add = nodes.new(type='ShaderNodeVectorMath')
-    vec_transform_node.vector_type = 'NORMAL'
-    vec_transform_node.convert_from = 'WORLD'
-    vec_transform_node.convert_to = 'OBJECT'
-    vec_math_scale.operation = 'SCALE'
-    vec_math_scale.inputs[1].default_value = (0.5, 0.5, 0.5)
-    vec_math_add.operation = 'ADD'
-    vec_math_add.inputs[1].default_value = (0.5, 0.5, 0.5)
-    links = normal_mat.node_tree.links
-    links.new(geo_node.outputs['Normal'], vec_transform_node.inputs['Vector'])
-    links.new(vec_transform_node.outputs['Vector'], vec_math_scale.inputs[0])
-    links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
-    links.new(vec_math_add.outputs['Vector'], output_node.inputs['Surface'])
-    
-    scene.view_layers[0].material_override = normal_mat
-    scene.render.filepath = p['normal_output']
-    bpy.ops.render.render(write_still=True)
+    if p['render_mode'] in ('All', 'Normal'):
+        normal_mat = bpy.data.materials.new(name="NormalMaterial")
+        normal_mat.use_nodes = True
+        nodes = normal_mat.node_tree.nodes
+        nodes.clear()
+        output_node = nodes.new(type='ShaderNodeOutputMaterial')
+        geo_node = nodes.new(type='ShaderNodeNewGeometry')
+        vec_transform_node = nodes.new(type='ShaderNodeVectorTransform')
+        vec_math_scale = nodes.new(type='ShaderNodeVectorMath')
+        vec_math_add = nodes.new(type='ShaderNodeVectorMath')
+        vec_transform_node.vector_type = 'NORMAL'
+        vec_transform_node.convert_from = 'WORLD'
+        vec_transform_node.convert_to = 'OBJECT'
+        vec_math_scale.operation = 'SCALE'
+        vec_math_scale.inputs[1].default_value = (0.5, 0.5, 0.5)
+        vec_math_add.operation = 'ADD'
+        vec_math_add.inputs[1].default_value = (0.5, 0.5, 0.5)
+        links = normal_mat.node_tree.links
+        links.new(geo_node.outputs['Normal'], vec_transform_node.inputs['Vector'])
+        links.new(vec_transform_node.outputs['Vector'], vec_math_scale.inputs[0])
+        links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
+        links.new(vec_math_add.outputs['Vector'], output_node.inputs['Surface'])
+        
+        scene.view_layers[0].material_override = normal_mat
+        scene.render.filepath = p['normal_output']
+        bpy.ops.render.render(write_still=True)
     
     sys.exit(0)
 except Exception as e:
@@ -2764,11 +2790,18 @@ except Exception as e:
 
             _run_blender_script(script_path)
 
-            material_img = self._load_image_to_tensor(material_output_path)
-            wireframe_img = self._load_image_to_tensor(wireframe_output_path)
-            normal_img = self._load_image_to_tensor(normal_output_path)
-            
-            batched_images = torch.cat((material_img, wireframe_img, normal_img), 0)
+            images_to_load = []
+            if render_mode == "All":
+                images_to_load = [material_output_path, wireframe_output_path, normal_output_path]
+            elif render_mode == "Colored":
+                images_to_load = [material_output_path]
+            elif render_mode == "Solid":
+                images_to_load = [wireframe_output_path]
+            elif render_mode == "Normal":
+                images_to_load = [normal_output_path]
+
+            loaded_tensors = [self._load_image_to_tensor(path, res) for path in images_to_load]
+            batched_images = torch.cat(loaded_tensors, 0)
 
             return (batched_images,)
 
