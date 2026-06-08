@@ -2577,7 +2577,7 @@ class BlenderPreview:
         return {
             "required": {
                 "trimesh": ("TRIMESH",),
-                "render_mode": (["All", "Colored", "Solid", "Normal"], {"default": "All"}),
+                "render_mode": (["All", "Colored", "Solid", "Normal", "Depth"], {"default": "All"}),
                 "resolution": (["512", "1k", "2k", "4k"], {"default": "2k"}),
                 "padding": ("INT", {"default": 0, "min": -100, "max": 100, "step": 1}),
             }
@@ -2612,15 +2612,17 @@ class BlenderPreview:
             trimesh.export(file_obj=input_mesh_path)
             
             material_output_path = os.path.join(temp_dir, "material.png")
-            wireframe_output_path = os.path.join(temp_dir, "wireframe.png")
+            solid_output_path = os.path.join(temp_dir, "solid.png")
             normal_output_path = os.path.join(temp_dir, "normal.png")
+            depth_output_path = os.path.join(temp_dir, "depth.png")
             script_path = os.path.join(temp_dir, "render_script.py")
 
             script_params = {
                 'input_mesh': repr(input_mesh_path.replace('\\', '/')),
                 'material_output': repr(material_output_path.replace('\\', '/')),
-                'wireframe_output': repr(wireframe_output_path.replace('\\', '/')),
+                'solid_output': repr(solid_output_path.replace('\\', '/')),
                 'normal_output': repr(normal_output_path.replace('\\', '/')),
+                'depth_output': repr(depth_output_path.replace('\\', '/')),
                 'render_mode': repr(render_mode),
                 'res': str(res),
                 'padding': str(padding),
@@ -2730,25 +2732,50 @@ try:
         bpy.ops.render.render(write_still=True)
     
     if p['render_mode'] in ('All', 'Solid'):
-        wire_mat = bpy.data.materials.new(name="WireframeMaterial")
-        wire_mat.use_nodes = True
-        nodes = wire_mat.node_tree.nodes
+        solid_mat = bpy.data.materials.new(name="SolidTerracotta")
+        solid_mat.use_nodes = True
+        nodes = solid_mat.node_tree.nodes
         nodes.clear()
         output_node = nodes.new(type='ShaderNodeOutputMaterial')
         emission_node = nodes.new(type='ShaderNodeEmission')
-        emission_node.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
-        mix_shader = nodes.new(type='ShaderNodeMixShader')
-        wire_node = nodes.new(type='ShaderNodeWireframe')
-        wire_node.inputs['Size'].default_value = 0.005
-        transparent_node = nodes.new(type='ShaderNodeBsdfTransparent')
-        
-        wire_mat.node_tree.links.new(wire_node.outputs['Fac'], mix_shader.inputs['Fac'])
-        wire_mat.node_tree.links.new(transparent_node.outputs['BSDF'], mix_shader.inputs[1])
-        wire_mat.node_tree.links.new(emission_node.outputs['Emission'], mix_shader.inputs[2])
-        wire_mat.node_tree.links.new(mix_shader.outputs['Shader'], output_node.inputs['Surface'])
-        
-        scene.view_layers[0].material_override = wire_mat
-        scene.render.filepath = p['wireframe_output']
+        local_path = bpy.utils.resource_path('LOCAL')
+        matcap_file = os.path.join(local_path, "datafiles", "studiolights", "matcap", "red_wax.exr")
+        if not os.path.exists(matcap_file):
+            matcap_file = os.path.join(local_path, "datafiles", "studiolights", "matcap", "clay_warm.exr")
+        if not os.path.exists(matcap_file):
+            matcap_file = os.path.join(local_path, "datafiles", "studiolights", "matcap", "clay_brown.exr")
+        tex_node = nodes.new(type='ShaderNodeTexImage')
+        try:
+            img = bpy.data.images.load(matcap_file)
+            tex_node.image = img
+        except Exception:
+            pass
+        geo_node = nodes.new(type='ShaderNodeNewGeometry')
+        vec_transform = nodes.new(type='ShaderNodeVectorTransform')
+        vec_transform.vector_type = 'NORMAL'
+        vec_transform.convert_from = 'WORLD'
+        vec_transform.convert_to = 'CAMERA'
+        vec_math_scale = nodes.new(type='ShaderNodeVectorMath')
+        vec_math_scale.operation = 'SCALE'
+        vec_math_scale.inputs[1].default_value = (0.5, 0.5, 0.5)
+        vec_math_add = nodes.new(type='ShaderNodeVectorMath')
+        vec_math_add.operation = 'ADD'
+        vec_math_add.inputs[1].default_value = (0.5, 0.5, 0.5)
+        mix_node = nodes.new(type='ShaderNodeMix')
+        mix_node.data_type = 'RGBA'
+        mix_node.blend_type = 'MIX'
+        mix_node.inputs['Factor'].default_value = 0.9
+        mix_node.inputs['B'].default_value = (0.23, 0.05, 0.04, 1.0)
+        links = solid_mat.node_tree.links
+        links.new(geo_node.outputs['Normal'], vec_transform.inputs['Vector'])
+        links.new(vec_transform.outputs['Vector'], vec_math_scale.inputs[0])
+        links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
+        links.new(vec_math_add.outputs['Vector'], tex_node.inputs['Vector'])
+        links.new(tex_node.outputs['Color'], mix_node.inputs['A'])
+        links.new(mix_node.outputs['Result'], emission_node.inputs['Color'])
+        links.new(emission_node.outputs['Emission'], output_node.inputs['Surface'])
+        scene.view_layers[0].material_override = solid_mat
+        scene.render.filepath = p['solid_output']
         bpy.ops.render.render(write_still=True)
 
     if p['render_mode'] in ('All', 'Normal'):
@@ -2773,9 +2800,46 @@ try:
         links.new(vec_transform_node.outputs['Vector'], vec_math_scale.inputs[0])
         links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
         links.new(vec_math_add.outputs['Vector'], output_node.inputs['Surface'])
-        
         scene.view_layers[0].material_override = normal_mat
         scene.render.filepath = p['normal_output']
+        bpy.ops.render.render(write_still=True)
+
+    if p['render_mode'] in ('All', 'Depth'):
+        near = 0.01
+        far = 10.0
+        if obj and len(obj.data.vertices) > 0:
+            import numpy as np
+            bpy.context.view_layer.update()
+            coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+            obj.data.vertices.foreach_get('co', coords)
+            coords.shape = (-1, 3)
+            ones = np.ones((coords.shape[0], 1), dtype=np.float32)
+            coords_hom = np.hstack((coords, ones))
+            local_to_camera = camera_obj.matrix_world.inverted() @ obj.matrix_world
+            local_to_camera_np = np.array(local_to_camera)
+            cam_coords = coords_hom @ local_to_camera_np.T
+            depths = -cam_coords[:, 2]
+            near = float(np.min(depths))
+            far = float(np.max(depths))
+            near = max(0.01, near)
+        depth_mat = bpy.data.materials.new(name="DepthMaterial")
+        depth_mat.use_nodes = True
+        nodes = depth_mat.node_tree.nodes
+        nodes.clear()
+        output_node = nodes.new(type='ShaderNodeOutputMaterial')
+        emission_node = nodes.new(type='ShaderNodeEmission')
+        camera_data = nodes.new(type='ShaderNodeCameraData')
+        map_range = nodes.new(type='ShaderNodeMapRange')
+        map_range.inputs[1].default_value = near
+        map_range.inputs[2].default_value = far
+        map_range.inputs[3].default_value = 1.0
+        map_range.inputs[4].default_value = 0.0
+        links = depth_mat.node_tree.links
+        links.new(camera_data.outputs['View Z Depth'], map_range.inputs[0])
+        links.new(map_range.outputs[0], emission_node.inputs[0])
+        links.new(emission_node.outputs[0], output_node.inputs[0])
+        scene.view_layers[0].material_override = depth_mat
+        scene.render.filepath = p['depth_output']
         bpy.ops.render.render(write_still=True)
     
     sys.exit(0)
@@ -2792,13 +2856,15 @@ except Exception as e:
 
             images_to_load = []
             if render_mode == "All":
-                images_to_load = [material_output_path, wireframe_output_path, normal_output_path]
+                images_to_load = [material_output_path, solid_output_path, normal_output_path, depth_output_path]
             elif render_mode == "Colored":
                 images_to_load = [material_output_path]
             elif render_mode == "Solid":
-                images_to_load = [wireframe_output_path]
+                images_to_load = [solid_output_path]
             elif render_mode == "Normal":
                 images_to_load = [normal_output_path]
+            elif render_mode == "Depth":
+                images_to_load = [depth_output_path]
 
             loaded_tensors = [self._load_image_to_tensor(path, res) for path in images_to_load]
             batched_images = torch.cat(loaded_tensors, 0)
