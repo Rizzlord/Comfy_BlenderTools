@@ -9,7 +9,9 @@ from .blender_nodes import (
 from server import PromptServer
 from aiohttp import web
 import os
+import folder_paths
 from .baking_nodes import TextureBake, ApplyMaterial, ExtractMaterial
+from .material_nodes import UpscaleMaterial
 from .utils import (
     Voxelize,
     VoxelSettings,
@@ -49,6 +51,7 @@ NODE_CLASS_MAPPINGS = {
     "TextureBake": TextureBake,
     "ApplyMaterial": ApplyMaterial,
     "ExtractMaterial": ExtractMaterial,
+    "UpscaleMaterial": UpscaleMaterial,
     "BlenderExportGLB": BlenderExportGLB,
     "BlenderLoadModel": BlenderLoadModel,
     "BlenderPreview3D": BlenderPreview3D,
@@ -87,6 +90,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextureBake": "Blender Bake Maps",
     "ApplyMaterial": "Apply Material",
     "ExtractMaterial": "Extract Material",
+    "UpscaleMaterial": "Upscale Material",
     "BlenderExportGLB": "Blender Export GLB",
     "BlenderLoadModel": "Blender Load Model",
     "BlenderPreview3D": "Blender Preview 3D",
@@ -122,33 +126,54 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 WEB_DIRECTORY = "./js"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
-@PromptServer.instance.routes.get("/blender_tools/list_models")
-async def list_models(request):
-    if "path" not in request.rel_url.query:
-        return web.json_response({"error": "path not provided"}, status=400)
-    
-    path = request.rel_url.query["path"]
-    
-    if not os.path.exists(path) or not os.path.isdir(path):
-         return web.json_response({"files": []})
-         
-    files = [f for f in os.listdir(path) if f.lower().endswith(('.glb', '.obj', '.fbx', '.ply', '.usdz', '.udz'))]
-    return web.json_response({"files": sorted(files)})
+try:
+    routes = PromptServer.instance.routes
+except AttributeError:
+    routes = None
 
-@PromptServer.instance.routes.get("/blender_tools/view_model")
-async def view_model(request):
-    if "path" not in request.rel_url.query:
-        return web.json_response({"error": "path not provided"}, status=400)
+if routes is not None:
+    @routes.get("/blender_tools/list_models")
+    async def list_models(request):
+        if "path" not in request.rel_url.query:
+            return web.json_response({"error": "path not provided"}, status=400)
         
-    path = request.rel_url.query["path"]
-    
-    print(f"[BlenderTools] Requesting view_model for path: {path}")
-    if not os.path.exists(path):
-        print(f"[BlenderTools] Error: Path does NOT exist: {path}")
-        return web.json_response({"error": "File not found"}, status=404)
+        path = request.rel_url.query["path"]
         
-    if not os.path.isfile(path):
-        print(f"[BlenderTools] Error: Path is NOT a file: {path}")
-        return web.json_response({"error": "Path is not a file"}, status=404)
+        if not os.path.exists(path) or not os.path.isdir(path):
+             return web.json_response({"files": []})
+             
+        files = [f for f in os.listdir(path) if f.lower().endswith(('.glb', '.obj', '.fbx', '.ply', '.usdz', '.udz'))]
+        return web.json_response({"files": sorted(files)})
+
+    @routes.get("/blender_tools/view_model")
+    async def view_model(request):
+        if "path" not in request.rel_url.query:
+            return web.json_response({"error": "path not provided"}, status=400)
+            
+        path = request.rel_url.query["path"]
         
-    return web.FileResponse(path)
+        print(f"[BlenderTools] Requesting view_model for path: {path}")
+        if not os.path.exists(path):
+            fixed_path = path.lstrip("/\\")
+            if len(fixed_path) > 2 and fixed_path[1] == ":" and os.path.exists(fixed_path):
+                path = fixed_path
+            else:
+                for base in [
+                    folder_paths.get_temp_directory(),
+                    folder_paths.get_output_directory(),
+                    folder_paths.get_input_directory(),
+                ]:
+                    candidate = os.path.join(base, fixed_path)
+                    if os.path.exists(candidate) and os.path.isfile(candidate):
+                        path = candidate
+                        break
+
+        if not os.path.exists(path):
+            print(f"[BlenderTools] Error: Path does NOT exist: {path}")
+            return web.json_response({"error": "File not found"}, status=404)
+            
+        if not os.path.isfile(path):
+            print(f"[BlenderTools] Error: Path is NOT a file: {path}")
+            return web.json_response({"error": "Path is not a file"}, status=404)
+            
+        return web.FileResponse(path)

@@ -503,20 +503,27 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         _lights: [],
         _animationId: null,
         _renderMode: 'original',
-        _renderQuality: 1024, // Default resolution height
+        _renderQuality: 1024,
         _originalMaterials: new Map(),
         _stretchMaterials: new Map(),
+        _textureMaterials: new Map(),
         _seamOverlays: new Map(),
         _quadOverlays: new Map(),
+        _wireframeOverlays: new Map(),
         _showSeams: false,
         _showQuads: false,
-        _modelText: null, // Stores raw OBJ source for quad overlays
+        _showWireframe: false,
+        _wireframeColor: "#00ff00",
+        _wireframeTransparent: false,
+        _modelText: null,
         _loadToken: 0,
+        _lastLoadedPath: null,
         _sharedMaterials: {
             normal: null,
             wireframe: null,
             checkerUv: null,
             checkerFallback: null,
+            transparent: null,
         },
 
         draw(ctx, node, widget_width, y, widget_height) { },
@@ -547,6 +554,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         left: "5px",
         zIndex: "20",
         display: "flex",
+        flexWrap: "wrap",
         gap: "5px",
         alignItems: "center",
         padding: "2px",
@@ -572,11 +580,106 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         return btn;
     };
 
+    const refreshBtn = document.createElement("button");
+    refreshBtn.title = "Reload last mesh";
+    refreshBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>';
+    Object.assign(refreshBtn.style, {
+        fontSize: "10px",
+        padding: "2px 6px",
+        cursor: "pointer",
+        backgroundColor: "#3a3a3a",
+        color: "#eee",
+        border: "1px solid #555",
+        borderRadius: "3px",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center"
+    });
+    refreshBtn.onmouseover = () => { refreshBtn.style.backgroundColor = "#505050"; };
+    refreshBtn.onmouseout = () => { refreshBtn.style.backgroundColor = "#3a3a3a"; };
+    refreshBtn.onclick = () => {
+        widget.reloadLastModel();
+    };
+    toolbar.appendChild(refreshBtn);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.title = "Remove preview and free memory";
+    closeBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+    Object.assign(closeBtn.style, {
+        fontSize: "10px",
+        padding: "2px 6px",
+        cursor: "pointer",
+        backgroundColor: "#4a2a2a",
+        color: "#ff9999",
+        border: "1px solid #663333",
+        borderRadius: "3px",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center"
+    });
+    closeBtn.onmouseover = () => {
+        closeBtn.style.backgroundColor = "#6a2a2a";
+        closeBtn.style.color = "#ffffff";
+    };
+    closeBtn.onmouseout = () => {
+        closeBtn.style.backgroundColor = "#4a2a2a";
+        closeBtn.style.color = "#ff9999";
+    };
+    closeBtn.onclick = () => {
+        widget.clearPreview();
+    };
+    toolbar.appendChild(closeBtn);
+
+    const sep = document.createElement("div");
+    Object.assign(sep.style, {
+        width: "1px",
+        height: "14px",
+        backgroundColor: "#555",
+        margin: "0 2px"
+    });
+    toolbar.appendChild(sep);
+
     toolbar.appendChild(createButton("Original", "original"));
     toolbar.appendChild(createButton("Normal", "normal"));
-    toolbar.appendChild(createButton("Wireframe", "wireframe"));
     toolbar.appendChild(createButton("Checker", "checker"));
     toolbar.appendChild(createButton("Stretch", "stretch"));
+
+    const texSelect = document.createElement("select");
+    Object.assign(texSelect.style, {
+        fontSize: "10px",
+        backgroundColor: "#444",
+        color: "#eee",
+        border: "1px solid #555",
+        borderRadius: "3px",
+        cursor: "pointer",
+        marginLeft: "5px"
+    });
+
+    const texOptions = [
+        { value: "none", text: "Textures" },
+        { value: "tex_albedo", text: "Albedo" },
+        { value: "tex_normal", text: "Normal" },
+        { value: "tex_roughness", text: "Roughness" },
+        { value: "tex_metallic", text: "Metallic" },
+        { value: "tex_ao", text: "Ambient Occlusion" },
+    ];
+
+    texOptions.forEach((opt) => {
+        const el = document.createElement("option");
+        el.value = opt.value;
+        el.textContent = opt.text;
+        texSelect.appendChild(el);
+    });
+
+    texSelect.onchange = (e) => {
+        const val = e.target.value;
+        if (val === "none") {
+            setRenderMode("original");
+        } else {
+            setRenderMode(val);
+        }
+    };
+    toolbar.appendChild(texSelect);
 
     // Resolution Dropdown
     const resSelect = document.createElement("select");
@@ -695,6 +798,80 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
     quadToggleContainer.appendChild(quadToggleText);
     toolbar.appendChild(quadToggleContainer);
 
+    const wireframeToggleContainer = document.createElement("label");
+    Object.assign(wireframeToggleContainer.style, {
+        display: "flex",
+        alignItems: "center",
+        gap: "4px",
+        marginLeft: "10px",
+        color: "#eee",
+        fontSize: "10px",
+        cursor: "pointer"
+    });
+
+    const wireframeToggle = document.createElement("input");
+    wireframeToggle.type = "checkbox";
+    wireframeToggle.checked = false;
+    wireframeToggle.style.cursor = "pointer";
+    wireframeToggle.oninput = (e) => {
+        widget._showWireframe = Boolean(e.target.checked);
+        wireframeTransToggleContainer.style.display = widget._showWireframe ? "flex" : "none";
+        ensureWireframeOverlays();
+        updateWireframeVisibility();
+        setRenderMode(widget._renderMode);
+    };
+
+    const wireframeToggleText = document.createElement("span");
+    wireframeToggleText.textContent = "Show wireframe";
+    wireframeToggleContainer.appendChild(wireframeToggle);
+    wireframeToggleContainer.appendChild(wireframeToggleText);
+    toolbar.appendChild(wireframeToggleContainer);
+
+    const wireframeColorInput = document.createElement("input");
+    wireframeColorInput.type = "color";
+    wireframeColorInput.value = widget._wireframeColor;
+    Object.assign(wireframeColorInput.style, {
+        width: "18px",
+        height: "18px",
+        padding: "0",
+        border: "1px solid #555",
+        borderRadius: "3px",
+        cursor: "pointer",
+        backgroundColor: "transparent",
+        marginLeft: "2px"
+    });
+    wireframeColorInput.oninput = (e) => {
+        widget._wireframeColor = e.target.value;
+        updateWireframeColor();
+    };
+    toolbar.appendChild(wireframeColorInput);
+
+    const wireframeTransToggleContainer = document.createElement("label");
+    Object.assign(wireframeTransToggleContainer.style, {
+        display: "none",
+        alignItems: "center",
+        gap: "4px",
+        marginLeft: "6px",
+        color: "#eee",
+        fontSize: "10px",
+        cursor: "pointer"
+    });
+
+    const wireframeTransToggle = document.createElement("input");
+    wireframeTransToggle.type = "checkbox";
+    wireframeTransToggle.checked = false;
+    wireframeTransToggle.style.cursor = "pointer";
+    wireframeTransToggle.oninput = (e) => {
+        widget._wireframeTransparent = Boolean(e.target.checked);
+        setRenderMode(widget._renderMode);
+    };
+
+    const wireframeTransToggleText = document.createElement("span");
+    wireframeTransToggleText.textContent = "Transparent mesh";
+    wireframeTransToggleContainer.appendChild(wireframeTransToggle);
+    wireframeTransToggleContainer.appendChild(wireframeTransToggleText);
+    toolbar.appendChild(wireframeTransToggleContainer);
+
     // Stats Overlay
     const statsOverlay = document.createElement("div");
     Object.assign(statsOverlay.style, {
@@ -793,6 +970,20 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             overlay.material?.dispose?.();
         }
         widget._quadOverlays.clear();
+
+        for (const overlay of widget._wireframeOverlays.values()) {
+            if (overlay.parent) {
+                overlay.parent.remove(overlay);
+            }
+            overlay.geometry?.dispose?.();
+            overlay.material?.dispose?.();
+        }
+        widget._wireframeOverlays.clear();
+
+        for (const material of widget._textureMaterials.values()) {
+            material?.dispose?.();
+        }
+        widget._textureMaterials.clear();
     };
 
     const disposeDetachedModel = (model) => {
@@ -832,6 +1023,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                 if (child.geometry) {
                     geometries.add(child.geometry);
                 }
+                addMaterialToSet(child.material, originalMaterials);
             });
         }
 
@@ -852,6 +1044,48 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
         widget._originalMaterials.clear();
         widget._model = null;
+        widget._modelText = null;
+    };
+
+    widget.clearPreview = () => {
+        widget._loadToken += 1;
+        pendingFilePath = "";
+        currentFilePath = "";
+        releaseCurrentModel();
+        if (widget._renderer) {
+            widget._renderer.renderLists?.dispose?.();
+        }
+        if (window.THREE?.Cache) {
+            window.THREE.Cache.clear();
+        }
+        setStatsLines(["No model loaded"], "rgba(255, 180, 120, 0.9)");
+    };
+
+    widget.reloadLastModel = () => {
+        const findGlb = () => {
+            if (!Array.isArray(node.widgets)) return null;
+            return node.widgets.find(w => w.name === "glb_path" || w.name === "model_path" || w.label === "model_path" || w.name === "file");
+        };
+        const glbWidget = findGlb();
+        let targetPath = widget._lastLoadedPath;
+        if (!targetPath && glbWidget && glbWidget.value && glbWidget.value !== "None") {
+            const dirWidget = Array.isArray(node.widgets) ? node.widgets.find(w => w.name === "directory") : null;
+            if (dirWidget && dirWidget.value) {
+                targetPath = dirWidget.value + (dirWidget.value.endsWith("/") ? "" : "/") + glbWidget.value;
+            } else {
+                targetPath = glbWidget.value;
+            }
+        }
+        if (!targetPath) {
+            try {
+                targetPath = localStorage.getItem(`Comfy.BlenderTools.PreviewCache.${node.id}`);
+            } catch (e) { }
+        }
+        if (targetPath && targetPath !== "None") {
+            widget.loadModel(targetPath, true, true);
+        } else {
+            setStatsLines(["No mesh to reload"], "rgba(255, 180, 120, 0.9)");
+        }
     };
 
     const disposeSharedMaterials = () => {
@@ -860,10 +1094,12 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         disposeMaterial(widget._sharedMaterials.wireframe, disposedTextures);
         disposeMaterial(widget._sharedMaterials.checkerUv, disposedTextures);
         disposeMaterial(widget._sharedMaterials.checkerFallback, disposedTextures);
+        disposeMaterial(widget._sharedMaterials.transparent, disposedTextures);
         widget._sharedMaterials.normal = null;
         widget._sharedMaterials.wireframe = null;
         widget._sharedMaterials.checkerUv = null;
         widget._sharedMaterials.checkerFallback = null;
+        widget._sharedMaterials.transparent = null;
     };
 
     const getSharedMaterial = (mode) => {
@@ -882,6 +1118,17 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                 });
             }
             return widget._sharedMaterials.wireframe;
+        }
+
+        if (mode === "transparent") {
+            if (!widget._sharedMaterials.transparent) {
+                widget._sharedMaterials.transparent = new THREE.MeshBasicMaterial({
+                    transparent: true,
+                    opacity: 0,
+                    depthWrite: false,
+                });
+            }
+            return widget._sharedMaterials.transparent;
         }
 
         if (mode === "checker_uv") {
@@ -1039,23 +1286,158 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         }
     };
 
+    const ensureWireframeOverlays = () => {
+        if (!widget._model) return;
+        if (widget._wireframeOverlays.size > 0) return;
+
+        widget._model.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+
+            const wireframeGeometry = new THREE.WireframeGeometry(child.geometry);
+            const wireframeLines = new THREE.LineSegments(
+                wireframeGeometry,
+                new THREE.LineBasicMaterial({
+                    color: new THREE.Color(widget._wireframeColor),
+                    transparent: true,
+                    opacity: 0.95,
+                    depthWrite: false,
+                    polygonOffset: true,
+                    polygonOffsetFactor: 1,
+                    polygonOffsetUnits: 1,
+                }),
+            );
+            wireframeLines.visible = widget._showWireframe;
+            wireframeLines.renderOrder = 9;
+            child.add(wireframeLines);
+            widget._wireframeOverlays.set(child.uuid, wireframeLines);
+        });
+    };
+
+    const updateWireframeVisibility = () => {
+        for (const overlay of widget._wireframeOverlays.values()) {
+            overlay.visible = widget._showWireframe;
+        }
+    };
+
+    const updateWireframeColor = () => {
+        for (const overlay of widget._wireframeOverlays.values()) {
+            if (overlay.material) {
+                overlay.material.color.set(widget._wireframeColor);
+            }
+        }
+    };
+
+    const createChannelMaterial = (texture, swizzle, fallbackVal) => {
+        if (!texture) {
+            const val = typeof fallbackVal === "number" ? fallbackVal : 0.5;
+            return new THREE.MeshBasicMaterial({
+                color: new THREE.Color(val, val, val),
+                side: THREE.DoubleSide
+            });
+        }
+        const m = new THREE.MeshBasicMaterial({
+            map: texture,
+            side: THREE.DoubleSide,
+            toneMapped: false
+        });
+        m.onBeforeCompile = (shader) => {
+            shader.fragmentShader = shader.fragmentShader.replace(
+                "#include <map_fragment>",
+                `#ifdef USE_MAP
+                    vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+                    diffuseColor = vec4(vec3(sampledDiffuseColor.${swizzle}), 1.0);
+                #endif`
+            );
+        };
+        m.customProgramCacheKey = () => `tex_ch_${swizzle}_${texture.uuid}`;
+        return m;
+    };
+
+    const getTextureMaterial = (mesh, mat, mode, index) => {
+        if (!mat) return null;
+        const cacheKey = `${mesh.uuid}_${index}_${mode}`;
+        if (widget._textureMaterials.has(cacheKey)) {
+            return widget._textureMaterials.get(cacheKey);
+        }
+
+        let resultMat = null;
+        const hasUv = Boolean(mesh.geometry?.attributes?.uv);
+
+        if (mode === "tex_albedo") {
+            if (mat.map && hasUv) {
+                resultMat = new THREE.MeshBasicMaterial({
+                    map: mat.map,
+                    side: THREE.DoubleSide,
+                    toneMapped: false
+                });
+            } else if (mat.color) {
+                resultMat = new THREE.MeshBasicMaterial({
+                    color: mat.color.clone(),
+                    side: THREE.DoubleSide
+                });
+            } else {
+                resultMat = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color(0xffffff),
+                    side: THREE.DoubleSide
+                });
+            }
+        } else if (mode === "tex_normal") {
+            const normTex = mat.normalMap || mat.bumpMap;
+            if (normTex && hasUv) {
+                resultMat = new THREE.MeshBasicMaterial({
+                    map: normTex,
+                    side: THREE.DoubleSide,
+                    toneMapped: false
+                });
+            } else {
+                resultMat = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color(0.5, 0.5, 1.0),
+                    side: THREE.DoubleSide
+                });
+            }
+        } else if (mode === "tex_roughness") {
+            const roughTex = hasUv ? (mat.roughnessMap || mat.metalnessMap || mat.aoMap) : null;
+            const fallback = typeof mat.roughness === "number" ? mat.roughness : 0.5;
+            resultMat = createChannelMaterial(roughTex, "g", fallback);
+        } else if (mode === "tex_metallic") {
+            const metalTex = hasUv ? (mat.metalnessMap || mat.roughnessMap || mat.aoMap) : null;
+            const fallback = typeof mat.metalness === "number" ? mat.metalness : 0.0;
+            resultMat = createChannelMaterial(metalTex, "b", fallback);
+        } else if (mode === "tex_ao") {
+            const aoTex = hasUv ? (mat.aoMap || mat.lightMap || mat.roughnessMap || mat.metalnessMap) : null;
+            resultMat = createChannelMaterial(aoTex, "r", 1.0);
+        }
+
+        if (!resultMat) {
+            resultMat = mat;
+        }
+
+        widget._textureMaterials.set(cacheKey, resultMat);
+        return resultMat;
+    };
+
     const setRenderMode = (mode) => {
-        if (!widget._model || !THREE) return;
         widget._renderMode = mode;
+        if (mode.startsWith("tex_")) {
+            texSelect.value = mode;
+        } else {
+            texSelect.value = "none";
+        }
+        if (!widget._model || !THREE) return;
         if (mode === 'stretch') {
             ensureStretchMaterials();
         }
 
         widget._model.traverse((child) => {
             if (child.isMesh) {
-                if (mode === 'original') {
+                if (widget._showWireframe && widget._wireframeTransparent) {
+                    child.material = getSharedMaterial("transparent");
+                } else if (mode === 'original') {
                     if (widget._originalMaterials.has(child.uuid)) {
                         child.material = widget._originalMaterials.get(child.uuid);
                     }
                 } else if (mode === 'normal') {
                     child.material = getSharedMaterial("normal");
-                } else if (mode === 'wireframe') {
-                    child.material = getSharedMaterial("wireframe");
                 } else if (mode === 'checker') {
                     child.material = child.geometry?.attributes?.uv
                         ? getSharedMaterial("checker_uv")
@@ -1064,6 +1446,15 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                     const stretchMaterial = widget._stretchMaterials.get(child.uuid);
                     if (stretchMaterial) {
                         child.material = stretchMaterial;
+                    }
+                } else if (mode.startsWith("tex_")) {
+                    const origMat = widget._originalMaterials.get(child.uuid);
+                    if (origMat) {
+                        if (Array.isArray(origMat)) {
+                            child.material = origMat.map((m, idx) => getTextureMaterial(child, m, mode, idx));
+                        } else {
+                            child.material = getTextureMaterial(child, origMat, mode, 0);
+                        }
                     }
                 }
             }
@@ -1077,6 +1468,11 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             ensureQuadOverlays();
         }
         updateQuadVisibility();
+
+        if (widget._showWireframe) {
+            ensureWireframeOverlays();
+        }
+        updateWireframeVisibility();
     };
 
     const updatePosition = () => {
@@ -1190,7 +1586,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
 
     // Exposed method to load model
     // alwaysShow: force display even if path is null (e.g. for Preview node wanting to stay visible)
-    widget.loadModel = async (relativePath, alwaysShow = false) => {
+    widget.loadModel = async (relativePath, alwaysShow = false, forceReload = false) => {
         await loadThree();
         if (!THREE || !GLTFLoader || !OrbitControls) return;
 
@@ -1207,7 +1603,6 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             return;
         }
 
-        // If no path provided
         if (!relativePath || relativePath === "None") {
             pendingFilePath = "";
             currentFilePath = "";
@@ -1225,15 +1620,19 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
             }
         }
 
+        if (relativePath && relativePath !== "None") {
+            widget._lastLoadedPath = relativePath;
+        }
+
         const fullPath = relativePath && (relativePath.startsWith("/") ? relativePath : ("/" + relativePath));
 
-        if (fullPath === currentFilePath && widget._model) {
+        if (!forceReload && fullPath === currentFilePath && widget._model) {
             container.style.display = "block";
             updatePosition();
             return;
         }
 
-        if (fullPath === pendingFilePath) {
+        if (!forceReload && fullPath === pendingFilePath) {
             container.style.display = "block";
             updatePosition();
             return;
@@ -1445,6 +1844,10 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
                 ensureQuadOverlays(objText);
                 updateQuadVisibility();
             }
+            if (widget._showWireframe) {
+                ensureWireframeOverlays();
+                updateWireframeVisibility();
+            }
 
             container.style.display = "block";
             updatePosition();
@@ -1452,6 +1855,7 @@ function create3DPreviewWidget(node, containerName = "3D Preview") {
         }, onProgress, onError);
     };
 
+    node._preview3DWidget = widget;
     node.addCustomWidget(widget);
     return widget;
 }
@@ -1478,6 +1882,7 @@ app.registerExtension({
             if (path && file && file !== "None" && file !== "") {
                 // Construct full path for loader
                 const full = path + (path.endsWith("/") ? "" : "/") + file;
+                widget._lastLoadedPath = full;
                 widget.loadModel(full, false); // false = hide if missing
             } else {
                 widget.loadModel(null, false);
@@ -1531,57 +1936,105 @@ app.registerExtension({
     },
 });
 
+function updatePreviewNodeModel(targetNode, path) {
+    if (!targetNode || !path) return;
+    if (targetNode._preview3DWidget) {
+        targetNode._preview3DWidget._lastLoadedPath = path;
+        targetNode._preview3DWidget.loadModel(path, true, true);
+    }
+    try {
+        localStorage.setItem(`Comfy.BlenderTools.PreviewCache.${targetNode.id}`, path);
+    } catch (e) { }
+    const glbWidget = Array.isArray(targetNode.widgets)
+        ? targetNode.widgets.find(w => w.name === "glb_path" || w.name === "model_path" || w.label === "model_path")
+        : null;
+    if (glbWidget) {
+        glbWidget.value = path;
+    }
+}
+
 app.registerExtension({
     name: "Comfy.BlenderTools.BlenderPreview3D",
+    setup() {
+        api.addEventListener("executed", ({ detail }) => {
+            if (!detail) return;
+            const nodeId = detail.display_node || detail.node;
+            if (nodeId === undefined || nodeId === null) return;
+            const targetNode = app.graph?.getNodeById?.(nodeId);
+            if (!targetNode || targetNode.comfyClass !== "BlenderPreview3D") return;
+            const output = detail.output;
+            const path = output?.model_path?.[0] || (typeof output?.model_path === "string" ? output.model_path : null);
+            if (path) {
+                updatePreviewNodeModel(targetNode, path);
+            }
+        });
+    },
+    onNodeOutputsUpdated(nodeOutputs) {
+        if (!nodeOutputs) return;
+        for (const [locatorId, output] of Object.entries(nodeOutputs)) {
+            const nodeId = locatorId.includes(":") ? locatorId.split(":")[0] : locatorId;
+            const targetNode = app.graph?.getNodeById?.(nodeId);
+            if (!targetNode || targetNode.comfyClass !== "BlenderPreview3D") continue;
+            const path = output?.model_path?.[0] || (typeof output?.model_path === "string" ? output.model_path : null);
+            if (path) {
+                updatePreviewNodeModel(targetNode, path);
+            }
+        }
+    },
     async nodeCreated(node) {
         if (node.comfyClass !== "BlenderPreview3D") return;
 
+        if (!node.size || node.size[0] < 340 || node.size[1] < 320) {
+            node.setSize([Math.max(node.size?.[0] || 0, 340), Math.max(node.size?.[1] || 0, 320)]);
+        }
+
         await loadThree();
         const widget = create3DPreviewWidget(node);
+        node._preview3DWidget = widget;
 
-        // state persistence helper
+        const findGlbWidget = () => {
+            if (!Array.isArray(node.widgets)) return null;
+            return node.widgets.find(w => w.name === "glb_path" || w.name === "model_path" || w.label === "model_path");
+        };
+
         const loadFromState = () => {
-            const glbWidget = node.widgets ? node.widgets.find(w => w.name === "glb_path") : null;
+            const glbWidget = findGlbWidget();
 
-            // 1. Try widget value
             if (glbWidget && glbWidget.value) {
+                widget._lastLoadedPath = glbWidget.value;
                 widget.loadModel(glbWidget.value, true);
                 return;
             }
 
-            // 2. Try localStorage cache (persists across reloads without save)
             const cachedPath = localStorage.getItem(`Comfy.BlenderTools.PreviewCache.${node.id}`);
             if (cachedPath) {
+                widget._lastLoadedPath = cachedPath;
                 widget.loadModel(cachedPath, true);
                 return;
             }
 
-            // 3. Empty
             widget.loadModel(null, true);
         };
 
-        // Listen for widget changes
-        const glbWidget = node.widgets ? node.widgets.find(w => w.name === "glb_path") : null;
+        const glbWidget = findGlbWidget();
         if (glbWidget) {
             const originalCallback = glbWidget.callback;
             glbWidget.callback = function (v) {
                 if (originalCallback) originalCallback.apply(this, arguments);
+                if (v) {
+                    widget._lastLoadedPath = v;
+                    localStorage.setItem(`Comfy.BlenderTools.PreviewCache.${node.id}`, v);
+                }
                 widget.loadModel(v, true);
-                // Update cache too? maybe not needed if widget persists naturally
             };
         }
 
         const onExecuted = node.onExecuted;
         node.onExecuted = function (message) {
             if (onExecuted) onExecuted.apply(this, arguments);
-            if (message && message.model_path) {
-                const path = message.model_path[0];
-                widget.loadModel(path, true);
-
-                // Persist execution result to localStorage
-                localStorage.setItem(`Comfy.BlenderTools.PreviewCache.${node.id}`, path);
-            } else {
-                console.log("Model not found in execution output");
+            const path = message?.model_path?.[0] || (typeof message?.model_path === "string" ? message.model_path : null);
+            if (path) {
+                updatePreviewNodeModel(node, path);
             }
         };
 
@@ -1593,7 +2046,6 @@ app.registerExtension({
             }, 100);
         };
 
-        // Initial load
         setTimeout(() => {
             loadFromState();
         }, 100);

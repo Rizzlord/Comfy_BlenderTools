@@ -2580,6 +2580,8 @@ class BlenderPreview:
                 "render_mode": (["All", "Colored", "Solid", "Normal", "Depth"], {"default": "All"}),
                 "resolution": (["512", "1k", "2k", "4k"], {"default": "2k"}),
                 "padding": ("INT", {"default": 0, "min": -100, "max": 100, "step": 1}),
+                "multiview": ("BOOLEAN", {"default": False}),
+                "views": (["2", "4", "6"], {"default": "4"}),
             }
         }
 
@@ -2595,7 +2597,11 @@ class BlenderPreview:
         
         try:
             img = Image.open(image_path)
-            if img.mode != 'RGB':
+            if img.mode == 'RGBA':
+                white_bg = Image.new('RGB', img.size, (255, 255, 255))
+                white_bg.paste(img, mask=img.split()[3])
+                img = white_bg
+            elif img.mode != 'RGB':
                 img = img.convert('RGB')
             img_np = np.array(img).astype(np.float32) / 255.0
             return torch.from_numpy(img_np).unsqueeze(0)
@@ -2603,29 +2609,47 @@ class BlenderPreview:
             print(f"Error loading image {image_path}: {e}")
             return torch.zeros((1, res, res, 3), dtype=torch.float32)
 
-    def render_thumbnails(self, trimesh, render_mode, resolution, padding):
+    def render_thumbnails(self, trimesh, render_mode, resolution, padding, multiview=False, views="4"):
         res_map = {"512": 512, "1k": 1024, "2k": 2048, "4k": 4096}
         res = res_map.get(resolution, 2048)
+
+        view_count = int(views) if str(views).isdigit() else 4
+        if not multiview:
+            view_names = ["single"]
+        elif view_count == 2:
+            view_names = ["front", "back"]
+        elif view_count == 6:
+            view_names = ["front", "back", "left", "right", "top", "bottom"]
+        else:
+            view_names = ["front", "back", "left", "right"]
+
+        if render_mode == "All":
+            mode_names = ["material", "solid", "normal", "depth"]
+        elif render_mode == "Colored":
+            mode_names = ["material"]
+        elif render_mode == "Solid":
+            mode_names = ["solid"]
+        elif render_mode == "Normal":
+            mode_names = ["normal"]
+        elif render_mode == "Depth":
+            mode_names = ["depth"]
+        else:
+            mode_names = ["material"]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             input_mesh_path = os.path.join(temp_dir, "input_mesh.glb")
             trimesh.export(file_obj=input_mesh_path)
-            
-            material_output_path = os.path.join(temp_dir, "material.png")
-            solid_output_path = os.path.join(temp_dir, "solid.png")
-            normal_output_path = os.path.join(temp_dir, "normal.png")
-            depth_output_path = os.path.join(temp_dir, "depth.png")
             script_path = os.path.join(temp_dir, "render_script.py")
 
             script_params = {
                 'input_mesh': repr(input_mesh_path.replace('\\', '/')),
-                'material_output': repr(material_output_path.replace('\\', '/')),
-                'solid_output': repr(solid_output_path.replace('\\', '/')),
-                'normal_output': repr(normal_output_path.replace('\\', '/')),
-                'depth_output': repr(depth_output_path.replace('\\', '/')),
+                'output_dir': repr(temp_dir.replace('\\', '/')),
                 'render_mode': repr(render_mode),
                 'res': str(res),
                 'padding': str(padding),
+                'multiview': 'True' if multiview else 'False',
+                'views': repr(view_names),
+                'modes': repr(mode_names),
             }
 
             blender_script = f"""
@@ -2671,67 +2695,95 @@ try:
         print("Falling back to CPU.")
         scene.cycles.device = 'CPU'
 
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("New_Render_World")
+    world = scene.world
+    world.use_nodes = True
+    bg_node = world.node_tree.nodes.get('Background')
+    if not bg_node:
+        bg_node = world.node_tree.nodes.new('ShaderNodeBackground')
+        output_node = world.node_tree.nodes.get('World Output')
+        if not output_node:
+            output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
+        world.node_tree.links.new(bg_node.outputs['Background'], output_node.inputs['Surface'])
+    bg_node.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+    bg_node.inputs['Strength'].default_value = 1.0
+    scene.view_settings.view_transform = 'Standard'
+    scene.cycles.max_bounces = 8
+    scene.cycles.diffuse_bounces = 4
+
     bpy.ops.import_scene.gltf(filepath=p['input_mesh'])
     obj = next((o for o in bpy.context.scene.objects if o.type == 'MESH'), None)
     
-    bpy.ops.object.camera_add(location=(0,0,0))
-    camera_obj = bpy.context.active_object
-    scene.camera = camera_obj
-    
-    empty_target = bpy.data.objects.new("LookAtTarget", None)
-    scene.collection.objects.link(empty_target)
-    empty_target.location = (0, 0, 0)
-    
     if obj:
+        bbox = obj.bound_box
+        min_x = min(v[0] for v in bbox)
+        max_x = max(v[0] for v in bbox)
+        min_y = min(v[1] for v in bbox)
+        max_y = max(v[1] for v in bbox)
+        min_z = min(v[2] for v in bbox)
+        max_z = max(v[2] for v in bbox)
+
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        center_z = (min_z + max_z) / 2
+
         bpy.ops.object.select_all(action='DESELECT')
         obj.select_set(True)
         bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+        
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.transform.translate(value=(-center_x, -center_y, -center_z))
+        bpy.ops.object.mode_set(mode='OBJECT')
         obj.location = (0, 0, 0)
-        obj.rotation_euler = (0, 0, 0)
         
-        radius = max(Vector(corner).length for corner in obj.bound_box)
-        fov = camera_obj.data.angle
-        res = int(p['res'])
-        padding_val = int(p['padding'])
-        if padding_val == 0:
-            distance = radius / math.sin((fov / 2.0) * max(1.0, res - 20.0) / res)
-        else:
-            distance = (radius / math.sin(fov / 2.0)) * (1.0 + padding_val / 100.0)
-        
-        direction = Vector((0.0, -2.5, 0.5)).normalized()
-        camera_obj.location = direction * distance
+        current_max_radius_sq = 0.0
+        for vertex in obj.data.vertices:
+            if vertex.co.length_squared > current_max_radius_sq:
+                current_max_radius_sq = vertex.co.length_squared
+        current_max_radius = math.sqrt(current_max_radius_sq)
 
-        constraint = camera_obj.constraints.new(type='TRACK_TO')
-        constraint.target = empty_target
-    
-    bpy.ops.object.light_add(type='AREA', location=(-5, -5, 5))
-    key_light = bpy.context.active_object
-    key_light.data.energy = 1500
-    key_light.data.size = 3
-    key_constraint = key_light.constraints.new(type='TRACK_TO')
-    key_constraint.target = empty_target
-    
-    bpy.ops.object.light_add(type='AREA', location=(5, -4, 2))
-    fill_light = bpy.context.active_object
-    fill_light.data.energy = 700
-    fill_light.data.size = 4
-    fill_constraint = fill_light.constraints.new(type='TRACK_TO')
-    fill_constraint.target = empty_target
+        if current_max_radius > 1e-6:
+            norm_size = 1.15
+            scale_user = current_max_radius * 2.0
+            scale_factor = norm_size / scale_user
+            obj.scale = (scale_factor, scale_factor, scale_factor)
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
-    bpy.ops.object.light_add(type='AREA', location=(-2, 5, 2))
-    rim_light = bpy.context.active_object
-    rim_light.data.energy = 1000
-    rim_light.data.size = 3
-    rim_constraint = rim_light.constraints.new(type='TRACK_TO')
-    rim_constraint.target = empty_target
+    distance = 1.45
+    ortho_scale = 2.0 * (1.0 + float(p['padding']) / 100.0)
 
-    if p['render_mode'] in ('All', 'Colored'):
-        scene.view_layers[0].material_override = None
-        scene.render.filepath = p['material_output']
-        bpy.ops.render.render(write_still=True)
-    
-    if p['render_mode'] in ('All', 'Solid'):
+    empty_target = bpy.data.objects.new("LookAtTarget", None)
+    scene.collection.objects.link(empty_target)
+    empty_target.location = (0, 0, 0)
+
+    camera_data = bpy.data.cameras.new(name='Camera')
+    camera_data.type = 'ORTHO'
+    camera_data.ortho_scale = ortho_scale
+    camera_data.clip_start = 0.1
+    camera_data.clip_end = 100.0
+
+    camera_obj = bpy.data.objects.new('Camera', camera_data)
+    scene.collection.objects.link(camera_obj)
+    scene.camera = camera_obj
+
+    cam_constraint = camera_obj.constraints.new(type='TRACK_TO')
+    cam_constraint.target = empty_target
+    cam_constraint.track_axis = 'TRACK_NEGATIVE_Z'
+    cam_constraint.up_axis = 'UP_Y'
+
+    view_coords = {{
+        'single': (0.0, -distance, 0.0),
+        'front': (0.0, -distance, 0.0),
+        'back': (0.0, distance, 0.0),
+        'left': (distance, 0.0, 0.0),
+        'right': (-distance, 0.0, 0.0),
+        'top': (0.0, 0.0, distance),
+        'bottom': (0.0, 0.0, -distance),
+    }}
+
+    if 'solid' in p['modes']:
         solid_mat = bpy.data.materials.new(name="SolidTerracotta")
         solid_mat.use_nodes = True
         nodes = solid_mat.node_tree.nodes
@@ -2774,11 +2826,8 @@ try:
         links.new(tex_node.outputs['Color'], mix_node.inputs['A'])
         links.new(mix_node.outputs['Result'], emission_node.inputs['Color'])
         links.new(emission_node.outputs['Emission'], output_node.inputs['Surface'])
-        scene.view_layers[0].material_override = solid_mat
-        scene.render.filepath = p['solid_output']
-        bpy.ops.render.render(write_still=True)
 
-    if p['render_mode'] in ('All', 'Normal'):
+    if 'normal' in p['modes']:
         normal_mat = bpy.data.materials.new(name="NormalMaterial")
         normal_mat.use_nodes = True
         nodes = normal_mat.node_tree.nodes
@@ -2800,28 +2849,8 @@ try:
         links.new(vec_transform_node.outputs['Vector'], vec_math_scale.inputs[0])
         links.new(vec_math_scale.outputs['Vector'], vec_math_add.inputs[0])
         links.new(vec_math_add.outputs['Vector'], output_node.inputs['Surface'])
-        scene.view_layers[0].material_override = normal_mat
-        scene.render.filepath = p['normal_output']
-        bpy.ops.render.render(write_still=True)
 
-    if p['render_mode'] in ('All', 'Depth'):
-        near = 0.01
-        far = 10.0
-        if obj and len(obj.data.vertices) > 0:
-            import numpy as np
-            bpy.context.view_layer.update()
-            coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
-            obj.data.vertices.foreach_get('co', coords)
-            coords.shape = (-1, 3)
-            ones = np.ones((coords.shape[0], 1), dtype=np.float32)
-            coords_hom = np.hstack((coords, ones))
-            local_to_camera = camera_obj.matrix_world.inverted() @ obj.matrix_world
-            local_to_camera_np = np.array(local_to_camera)
-            cam_coords = coords_hom @ local_to_camera_np.T
-            depths = -cam_coords[:, 2]
-            near = float(np.min(depths))
-            far = float(np.max(depths))
-            near = max(0.01, near)
+    if 'depth' in p['modes']:
         depth_mat = bpy.data.materials.new(name="DepthMaterial")
         depth_mat.use_nodes = True
         nodes = depth_mat.node_tree.nodes
@@ -2830,17 +2859,52 @@ try:
         emission_node = nodes.new(type='ShaderNodeEmission')
         camera_data = nodes.new(type='ShaderNodeCameraData')
         map_range = nodes.new(type='ShaderNodeMapRange')
-        map_range.inputs[1].default_value = near
-        map_range.inputs[2].default_value = far
         map_range.inputs[3].default_value = 1.0
         map_range.inputs[4].default_value = 0.0
         links = depth_mat.node_tree.links
         links.new(camera_data.outputs['View Z Depth'], map_range.inputs[0])
         links.new(map_range.outputs[0], emission_node.inputs[0])
         links.new(emission_node.outputs[0], output_node.inputs[0])
-        scene.view_layers[0].material_override = depth_mat
-        scene.render.filepath = p['depth_output']
-        bpy.ops.render.render(write_still=True)
+
+    def update_depth():
+        if obj and len(obj.data.vertices) > 0:
+            import numpy as np
+            coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+            obj.data.vertices.foreach_get('co', coords)
+            coords.shape = (-1, 3)
+            ones = np.ones((coords.shape[0], 1), dtype=np.float32)
+            coords_hom = np.hstack((coords, ones))
+            local_to_camera = camera_obj.matrix_world.inverted() @ obj.matrix_world
+            cam_coords = coords_hom @ np.array(local_to_camera).T
+            depths = -cam_coords[:, 2]
+            near = max(0.01, float(np.min(depths)))
+            far = float(np.max(depths))
+            if far <= near:
+                far = near + 1.0
+        else:
+            near = 0.01
+            far = 10.0
+        map_range.inputs[1].default_value = near
+        map_range.inputs[2].default_value = far
+
+    for m in p['modes']:
+        if m == 'material':
+            scene.view_layers[0].material_override = None
+        elif m == 'solid':
+            scene.view_layers[0].material_override = solid_mat
+        elif m == 'normal':
+            scene.view_layers[0].material_override = normal_mat
+        elif m == 'depth':
+            scene.view_layers[0].material_override = depth_mat
+
+        for v in p['views']:
+            camera_obj.location = view_coords[v]
+            bpy.context.view_layer.update()
+            if m == 'depth':
+                update_depth()
+            out_file = os.path.join(p['output_dir'], f"{{m}}_{{v}}.png")
+            scene.render.filepath = out_file
+            bpy.ops.render.render(write_still=True)
     
     sys.exit(0)
 except Exception as e:
@@ -2855,16 +2919,9 @@ except Exception as e:
             _run_blender_script(script_path)
 
             images_to_load = []
-            if render_mode == "All":
-                images_to_load = [material_output_path, solid_output_path, normal_output_path, depth_output_path]
-            elif render_mode == "Colored":
-                images_to_load = [material_output_path]
-            elif render_mode == "Solid":
-                images_to_load = [solid_output_path]
-            elif render_mode == "Normal":
-                images_to_load = [normal_output_path]
-            elif render_mode == "Depth":
-                images_to_load = [depth_output_path]
+            for m in mode_names:
+                for v in view_names:
+                    images_to_load.append(os.path.join(temp_dir, f"{m}_{v}.png"))
 
             loaded_tensors = [self._load_image_to_tensor(path, res) for path in images_to_load]
             batched_images = torch.cat(loaded_tensors, 0)

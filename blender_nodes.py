@@ -926,6 +926,10 @@ class BlenderPreview3D:
     CATEGORY = "Comfy_BlenderTools"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
     def preview_model(self, trimesh=None, glb_path=None):
         import random
         import string
@@ -938,36 +942,28 @@ class BlenderPreview3D:
 
         # Priority 1: Trimesh (Dynamic visualization)
         if trimesh is not None:
-            # Ensure temp directory exists
             temp_dir = folder_paths.get_temp_directory()
             os.makedirs(temp_dir, exist_ok=True)
 
-            # Generate unique filename
             random_name = "".join(
                 random.choices(string.ascii_lowercase + string.digits, k=8)
             )
             filename = f"blender_preview_{random_name}.glb"
             filepath = os.path.join(temp_dir, filename)
 
-            # Handle both single mesh and scene/list of meshes
-            if hasattr(trimesh, "export"):
-                # Single mesh object
-                trimesh.export(filepath)
-            elif isinstance(trimesh, list):
-                # List of meshes - combine all into one
+            if isinstance(trimesh, list):
                 if len(trimesh) > 0:
-                    # Filter valid mesh objects
                     valid_meshes = [m for m in trimesh if hasattr(m, "export")]
                     if len(valid_meshes) == 0:
                         raise ValueError("No valid mesh objects found in the list")
-                    # Concatenate all meshes into one
-                    combined_mesh = trimesh.util.concatenate(valid_meshes)
-                    combined_mesh.export(filepath)
+                    combined_mesh = trimesh_loader.util.concatenate(valid_meshes)
+                    combined_mesh.export(filepath, file_type="glb")
                 else:
                     raise ValueError("Empty trimesh list provided")
+            elif hasattr(trimesh, "export"):
+                trimesh.export(filepath, file_type="glb")
             else:
-                # Assume it's a Scene object
-                trimesh.export(filepath)
+                raise ValueError("Unsupported trimesh format")
 
             final_path = filepath
             print(f"BlenderPreview3D: Exported trimesh to {final_path}")
